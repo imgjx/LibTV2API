@@ -59,12 +59,38 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
 .media-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px}
 .media-card video,.media-card img{max-width:100%;border-radius:6px;display:block}
 .media-card audio{width:100%}
+.overlay{position:fixed;inset:0;background:rgba(8,10,14,.94);display:flex;align-items:center;justify-content:center;z-index:100}
+.login-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.login-card h1{margin:0 0 4px;font-size:20px;font-weight:600}
+.login-card input{width:100%;margin-bottom:12px}
+.login-card label{margin-bottom:5px}
+.qr{width:200px;height:200px;background:#fff;border-radius:10px;padding:8px;display:inline-block}
+.qr img{width:100%;height:100%}
+.b-warn{background:rgba(240,180,41,.16);color:var(--warn)}
+pre code,code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px;font-size:12px}
 </style>
 </head>
 <body>
+<!-- 管理员登录遮罩（单管理员，用户名/密码，支持改密） -->
+<div id="loginOverlay" class="overlay">
+  <div class="login-card">
+    <h1>Liblib2API</h1>
+    <p class="small muted">团队账号池面板 · 管理员登录（单管理员）</p>
+    <label>用户名</label>
+    <input id="lg_user" value="admin" autocomplete="username">
+    <label>密码</label>
+    <input id="lg_pass" type="password" value="admin" autocomplete="current-password" onkeydown="if(event.key==='Enter')adminLogin()">
+    <button class="primary" style="width:100%;margin-top:6px" onclick="adminLogin()">登录</button>
+    <p id="lgErr" class="small" style="color:var(--bad);min-height:16px"></p>
+    <p class="small muted" id="lgHint">默认账号 admin / admin，首次登录后请到「设置」修改密码。</p>
+  </div>
+</div>
 <header>
-  <h1>Liblib2API</h1><span class="ver">团队账号池面板 · v0.3.0</span>
+  <h1>Liblib2API</h1><span class="ver">团队账号池面板 · v0.4.0</span>
   <span class="ver" id="health"></span>
+  <span style="flex:1"></span>
+  <span class="ver" id="who"></span>
+  <button class="ghost" style="padding:6px 10px" onclick="logout()">退出</button>
 </header>
 <nav>
   <button data-tab="accounts" class="active">账号池</button>
@@ -241,6 +267,20 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
       </div>
       <div id="setBox" class="small muted" style="margin-top:8px"></div>
     </div>
+    <div class="card">
+      <h2>管理员与访问（单管理员 · 公网部署请务必开启鉴权）</h2>
+      <div id="adminBox" class="small muted"></div>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:1;min-width:200px"><label>旧密码</label><input id="pw_old" type="password" style="width:100%" placeholder="当前密码" autocomplete="current-password"></div>
+        <div style="flex:1;min-width:200px"><label>新密码</label><input id="pw_new" type="password" style="width:100%" placeholder="新密码" autocomplete="new-password"></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="changePassword()">修改密码</button></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="ghost" onclick="showApiKey()">显示对外 API Key</button>
+        <button class="ghost" onclick="regenApiKey()">重置 API Key</button>
+      </div>
+      <div id="apikeyBox" class="small muted" style="margin-top:8px"></div>
+    </div>
   </section>
 </main>
 
@@ -252,8 +292,31 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
 const API="/api/v1";
 let PG_TYPE="video";
 function toast(m,ok=true){const t=document.getElementById('toast');t.textContent=m;t.className='toast';if(!ok)t.style.borderColor='var(--bad)';t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),3500);}
-async function api(path,opt={}){const r=await fetch(API+path,Object.assign({headers:{'Content-Type':'application/json'}},opt));let j=null;try{j=await r.json();}catch(e){}
+function _token(){return localStorage.getItem('liblib_token')||'';}
+function showLogin(){document.getElementById('loginOverlay').style.display='flex';}
+function logout(){localStorage.removeItem('liblib_token');document.getElementById('who').textContent='';showLogin();}
+async function api(path,opt={}){const h={'Content-Type':'application/json'};const t=_token();if(t)h['Authorization']='Bearer '+t;
+  const r=await fetch(API+path,Object.assign({headers:h},opt));let j=null;try{j=await r.json();}catch(e){}
+  if(r.status===401){showLogin();throw new Error('unauthorized');}
   if(!r.ok){toast((j&&(j.detail||j.error))||('HTTP '+r.status),false);throw new Error('api err');}return j;}
+async function adminLogin(){const u=document.getElementById('lg_user').value,p=document.getElementById('lg_pass').value;
+  document.getElementById('lgErr').textContent='';
+  try{const r=await fetch(API+'/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    const d=await r.json().catch(()=>null);
+    if(!r.ok){document.getElementById('lgErr').textContent=(d&&d.detail)||'登录失败';return;}
+    localStorage.setItem('liblib_token',d.token);
+    document.getElementById('loginOverlay').style.display='none';
+    document.getElementById('who').textContent='@'+d.user;
+    if(d.needs_change)toast('请尽快在「设置」修改默认密码');
+    loadHealth();loadAccounts();}catch(e){document.getElementById('lgErr').textContent='网络错误';}}
+async function changePassword(){const o=document.getElementById('pw_old').value,n=document.getElementById('pw_new').value;
+  if(!o||!n){toast('请填写新旧密码',false);return;}
+  const j=await api('/admin/password',{method:'POST',body:JSON.stringify({old_password:o,new_password:n})});
+  toast('密码已修改，请重新登录');logout();}
+async function showApiKey(){const j=await api('/admin/apikey');
+  document.getElementById('apikeyBox').innerHTML=`<p class="small">对外 API Key（调用 /api/v1/* 时通过 <code>Authorization: Bearer</code> / <code>X-Api-Key</code> / <code>?api_key=</code> 携带）：</p><pre>${j.api_key}</pre>`;}
+async function regenApiKey(){const j=await api('/settings',{method:'POST',body:JSON.stringify({regenerate_api_key:true})});
+  document.getElementById('apikeyBox').innerHTML=`<p class="small">已重置，新 Key：</p><pre>${j.api_key}</pre>`;toast('API Key 已重置');}
 function tab(n){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===n));
   document.querySelectorAll('main section').forEach(s=>s.classList.add('hidden'));
   document.getElementById('tab-'+n).classList.remove('hidden');
@@ -286,7 +349,9 @@ async function phoneLogin(){const phone=document.getElementById('p_phone').value
   toast('登录成功，已自动识别类型');loadAccounts();}
 let wxTimer=null;
 async function wechatAuth(){const j=await api('/auth/wechat/authorize?open_browser=false');
-  document.getElementById('wxbox').innerHTML=`授权链接：<a href="${j.authorize_url}" target="_blank">${j.authorize_url}</a> · state=${j.state}<br><span id="wxstat" class="muted">等待扫码…（已自动轮询）</span>`;
+  let qrHtml='';
+  try{const qr=await api('/auth/wechat/qr?state='+j.state);qrHtml=`<div class="qr"><img src="${qr.qr_png}" alt="微信扫码登录"></div>`;}catch(e){qrHtml='';}
+  document.getElementById('wxbox').innerHTML=`${qrHtml}<p class="small muted">使用微信扫一扫登录（已自动轮询）；也可 <a href="${j.authorize_url}" target="_blank">点此打开授权链接</a></p>`;
   if(wxTimer)clearInterval(wxTimer);
   wxTimer=setInterval(()=>wechatPoll(j.state),3000);}
 async function wechatPoll(state){let j;try{j=await api('/auth/wechat/poll?state='+state);}catch(e){if(wxTimer){clearInterval(wxTimer);wxTimer=null;}toast('微信登录失败',false);return;}
@@ -376,7 +441,8 @@ async function loadSettings(){const j=await api('/settings');
   document.getElementById('set_model').value=j.openai_model||'';
   document.getElementById('set_pps').value=j.points_per_second??10;
   document.getElementById('set_int').value=j.monitor_interval??600;
-  document.getElementById('setBox').textContent='API Key 已配置：'+(j.openai_configured?'是':'否')+'（出于安全不回显明文）';}
+  document.getElementById('setBox').textContent='API Key 已配置：'+(j.openai_configured?'是':'否')+'（出于安全不回显明文）';
+  document.getElementById('adminBox').innerHTML=`当前管理员：<b>${j.admin_user||'-'}</b>${j.admin_needs_change?' <span class="badge b-warn">建议修改默认密码</span>':''} · 对外 API Key：${j.api_key_masked||'未设置'}`;}
 async function saveSettings(){const body={openai_base_url:document.getElementById('set_base').value||null,
   openai_model:document.getElementById('set_model').value||null,
   openai_api_key:document.getElementById('set_key').value||null,
@@ -385,7 +451,9 @@ async function saveSettings(){const body={openai_base_url:document.getElementByI
   const j=await api('/settings',{method:'POST',body:JSON.stringify(body)});
   document.getElementById('setBox').textContent='已保存。API Key 配置：'+(j.openai_configured?'是':'否');toast('设置已保存');}
 
-loadHealth();loadAccounts();
+// ---------- 初始化：无令牌则弹登录遮罩 ----------
+(function init(){if(_token()){document.getElementById('loginOverlay').style.display='none';loadHealth();loadAccounts();}
+  else{showLogin();}})();
 </script>
 </body>
 </html>

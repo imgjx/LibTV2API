@@ -27,7 +27,7 @@ import httpx
 
 import liblib2api.config as cfg
 
-# 单次生成每个账号能承担的「最长单段秒数」上限（避免一段过长被平台拒绝）
+# 单次生成每个账号能承担的「最长单段秒数」上限（兜底；实际会按模型配置覆盖）
 MAX_SEGMENT_SECONDS = 30
 
 
@@ -121,22 +121,39 @@ class VideoSplitPlanner:
         total_duration: int,
         accounts: list[dict],
         points_per_second: float = cfg.POINTS_PER_SECOND,
+        constraints: Optional[dict] = None,
     ) -> SplitPlan:
-        """accounts: [{account, points}]；返回 SplitPlan。"""
+        """accounts: [{account, points}]；返回 SplitPlan。
+
+        constraints: 来自模型实际配置的动态约束（不同模型差别很大）：
+            {
+              "max_segment_seconds": int,   # 单段最长（如 5/10/15/30）
+              "allowed_durations": [int],   # 允许的时长档位（可选，命中则强制对齐）
+              "points_per_second": float,   # 该模型每积分消耗（覆盖默认 pps）
+            }
+        """
+        constraints = constraints or {}
+        max_seg = int(constraints.get("max_segment_seconds") or MAX_SEGMENT_SECONDS)
+        pps = float(constraints.get("points_per_second") or points_per_second)
         if self.client is not None:
             try:
-                return self._plan_llm(prompt, total_duration, accounts, points_per_second)
+                return self._plan_llm(prompt, total_duration, accounts, pps, max_seg, constraints)
             except Exception as e:  # noqa: BLE001
                 # 任何失败都回退到确定性拆法，保证功能可用
-                return self._plan_fallback(total_duration, points_per_second,
+                return self._plan_fallback(total_duration, pps, max_seg,
                                            note=f"LLM 规划失败，已回退均分：{e}")
-        return self._plan_fallback(total_duration, points_per_second,
+        return self._plan_fallback(total_duration, pps, max_seg,
                                    note="未配置 OpenAI 兼容 API，使用确定性均分")
 
-    def _plan_llm(self, prompt, total_duration, accounts, pps) -> SplitPlan:
+    def _plan_llm(self, prompt, total_duration, accounts, pps, max_seg, constraints) -> SplitPlan:
         budgets = "；".join(
             f"{a['account']}={a.get('points')}点" for a in accounts
         ) or "（无可用账号积分信息）"
+        allowed = constraints.get("allowed_durations")
+        allowed_hint = (
+            f" 每段秒数必须是以下档位之一：{allowed}。" if allowed
+            else f" 每段秒数为不超过 {max_seg} 的整数。"
+        )
         system = (
             "你是一个视频分镜拆分器。用户要生成一段总时长固定的视频，但单个账号算力点不足，"
             "需要用团队多个账号接力分段生成。请把它拆成若干连续镜头片段，让相邻片段在画面上能衔接。"
@@ -145,11 +162,13 @@ class VideoSplitPlanner:
         user = (
             f"总时长：{total_duration} 秒。\n"
             f"团队账号预算（每个账号剩余算力点）：{budgets}\n"
-            f"每生成 1 秒约消耗 {pps} 点，单段最长 {MAX_SEGMENT_SECONDS} 秒。\n"
+            f"每生成 1 秒约消耗 {pps} 点，单段最长 {max_seg} 秒。\n"
             f"原提示词：{prompt}\n\n"
             "请把原提示词拆成 3~5 段连续镜头，每段给出秒数（整数）与该段的具体画面描述（承接上一段）。"
             "各段秒数之和必须严格等于总时长，且每段秒数×"
             f"{pps} 不超过最大单账号预算。\n"
+            + allowed_hint
+            + "\n"
             '返回 JSON：{"segments":[{"seconds":整数,"prompt":"该段画面描述"}]}\n'
             "注意：segments 数组的 seconds 求和必须等于 " + str(total_duration) + "。"
         )
@@ -160,21 +179,21 @@ class VideoSplitPlanner:
             sec = int(s.get("seconds") or 0)
             if sec <= 0:
                 continue
-            segments.append(Segment(seconds=min(sec, MAX_SEGMENT_SECONDS), prompt=str(s.get("prompt") or prompt)))
+            segments.append(Segment(seconds=min(sec, max_seg), prompt=str(s.get("prompt") or prompt)))
         total = sum(s.seconds for s in segments)
         if not segments or total != total_duration:
             # 校正：若和不对，按比例/补差调整到目标总时长
-            segments = self._normalize(segments, total_duration, prompt)
+            segments = self._normalize(segments, total_duration, prompt, max_seg)
         return SplitPlan(total_duration=total_duration, segments=segments, source="llm")
 
     @staticmethod
-    def _normalize(segments: list[Segment], total_duration: int, fallback_prompt: str) -> list[Segment]:
+    def _normalize(segments: list[Segment], total_duration: int, fallback_prompt: str, max_seg: int = MAX_SEGMENT_SECONDS) -> list[Segment]:
         if not segments:
-            return [Segment(seconds=total_duration, prompt=fallback_prompt)]
+            return [Segment(seconds=min(total_duration, max_seg), prompt=fallback_prompt)]
         # 按权重把总时长重新分配到各段（保持原始秒数占比），取整并修正尾差
         raw = [s.seconds for s in segments]
         s_sum = sum(raw) or 1
-        allocated = [max(1, round(x * total_duration / s_sum)) for x in raw]
+        allocated = [max(1, min(max_seg, round(x * total_duration / s_sum))) for x in raw]
         diff = total_duration - sum(allocated)
         allocated[0] += diff
         if allocated[0] < 1:
@@ -185,9 +204,11 @@ class VideoSplitPlanner:
         return out
 
     @staticmethod
-    def _plan_fallback(total_duration: int, pps: float, note: str = "") -> SplitPlan:
-        # 尽量均分；单段不超过 MAX_SEGMENT_SECONDS，至少分 3 段
-        n = max(3, -(-total_duration // MAX_SEGMENT_SECONDS))  # ceil
+    def _plan_fallback(total_duration: int, pps: float, max_seg: int = MAX_SEGMENT_SECONDS, note: str = "") -> SplitPlan:
+        max_seg = max(1, int(max_seg))
+        # 尽量均分；单段不超过 max_seg，至少分 3 段（除非总时长很短）
+        n = max(min(total_duration, 3), -(-total_duration // max_seg))  # ceil(总/单段上限)
+        n = max(1, n)
         base = total_duration // n
         rem = total_duration - base * n
         segs = []

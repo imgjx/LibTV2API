@@ -3,16 +3,18 @@
 设计原则
 --------
 1. 面板（/panel）是零依赖单页应用（panel.html），浏览器打开即可管理账号、看积分、
-   看模型可用性、发起图片/视频生成。
+   看模型可用性、发起图片/视频/音频生成。
 2. 对外 API（/api/v1/*）给自动化工作流用：图片/视频/音频生成走账号池交叉选择，
    积分、账号类型、模型可用性动态拉取。视频支持多格式输出与「多账号接力拆分生成」。
 3. 每个账号可绑定独立代理 IP。
 4. 后台每 10 分钟巡检账号活性 + 自动签到（monitor）。
+5. 公网/团队共享部署时：面板需**单管理员用户名/密码**登录；对外 API 需携带 **API Key**
+   （支持 Authorization: Bearer / X-Api-Key / ?api_key= 多种兼容形式）。
 
 关于「多用户」
 ------------
-这里的「多用户」指 liblib 平台账号池（团队成员各自的会员/额度包），
-而非给管理面板再加一套系统登录账号+改密码。面板仅供团队自用，不做面板级鉴权。
+这里的「多用户」指 liblib 平台账号池（团队成员各自的会员/额度包），面板本身只设一个管理员。
+管理员账号用于守护 WebUI 与对外 API 的访问，凭据仅存本机 settings.json（权限 0600）。
 
 账号池策略
 ----------
@@ -21,17 +23,23 @@
 """
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query
+import qrcode
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import liblib2api.config as cfg
+from liblib2api import auth as srv_auth
 from liblib2api.accounts import Account, AccountStore
 from liblib2api.credentials import CredentialStore
 from liblib2api.exceptions import ApiError, AuthError, ModelUnavailableError
@@ -59,15 +67,22 @@ log = logging.getLogger("liblib2api.panel")
 
 app = FastAPI(
     title="Liblib2API",
-    description="liblib 多账号管理面板 + 图片/视频生成开放接口（团队自用）",
-    version="0.3.0",
+    description="liblib 多账号管理面板 + 图片/视频/音频生成开放接口（团队自用）",
+    version="0.4.0",
 )
 
 _store = AccountStore()
 _selector = AccountSelector(_store)
 _monitor = AccountMonitor(_store, interval=int(os.environ.get("LIBLIB_MONITOR_INTERVAL", "600")))
 
-_PENDING_WECHAT: dict[str, Any] = {}
+_PENDING_WECHAT: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# 管理员 & API Key 运行时状态（由 lifespan 从 settings 载入）
+# ---------------------------------------------------------------------------
+_admin_user: str = cfg.ADMIN_USER
+_admin_pass_hash: Optional[str] = None
+_api_key: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,79 @@ def _save_settings(s: dict) -> None:
 
 def _type_label(at: Optional[str]) -> str:
     return cfg.ACCOUNT_TYPE_LABEL.get(at or "unknown", "未知")
+
+
+# ---------------------------------------------------------------------------
+# 管理员 & API Key 鉴权
+# ---------------------------------------------------------------------------
+def _ensure_admin() -> None:
+    """首次启动保证管理员与对外 API Key 存在：
+    - 未设密码则写入默认 admin/admin 并标记 needs_change=True（面板提示修改）
+    - 未设 api_key 则自动生成并持久化
+    """
+    global _admin_user, _admin_pass_hash, _api_key
+    s = _load_settings()
+    if not s.get("admin_pass_hash"):
+        s["admin_user"] = s.get("admin_user") or _admin_user
+        s["admin_pass_hash"] = srv_auth.hash_password(cfg.ADMIN_PASSWORD)
+        s["admin_needs_change"] = True
+    if not s.get("api_key"):
+        s["api_key"] = srv_auth.new_api_key()
+    _save_settings(s)
+    _admin_user = s.get("admin_user") or _admin_user
+    _admin_pass_hash = s["admin_pass_hash"]
+    _api_key = s["api_key"]
+
+
+def _check_request_auth(request: Request) -> bool:
+    """支持多种传入方式：Bearer、X-Api-Key、?api_key=；管理员会话令牌亦可调用。"""
+    if not cfg.REQUIRE_AUTH:
+        return True
+    candidates: list[str] = []
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        candidates.append(auth[7:].strip())
+    xk = request.headers.get("X-Api-Key")
+    if xk:
+        candidates.append(xk)
+    qk = request.query_params.get("api_key")
+    if qk:
+        candidates.append(qk)
+    for t in candidates:
+        if not t:
+            continue
+        if _api_key and t == _api_key:
+            return True
+        if srv_auth.verify_token(t) == _admin_user:
+            return True
+    return False
+
+
+_PUBLIC_PATHS = {
+    "/",
+    "/panel",
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):  # noqa: ANN001
+    path = request.url.path
+    if path in _PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/openapi.json") or path == "/redoc":
+        return await call_next(request)
+    # 登录接口无需鉴权
+    if path == "/api/v1/admin/login":
+        return await call_next(request)
+    if path.startswith("/api/v1/"):
+        if not _check_request_auth(request):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "未授权：请先登录面板，或在请求中携带 API Key（Authorization: Bearer / X-Api-Key / ?api_key=）"},
+            )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +235,7 @@ def _find_tool(creds, kind: str) -> Optional[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 应用持久化设置（监控间隔等）
+    _ensure_admin()
     _s = _load_settings()
     if _s.get("monitor_interval"):
         try:
@@ -627,7 +716,7 @@ def wechat_authorize(open_browser: bool = Query(False)):
 
     flow = WechatLoginFlow()
     state, url = flow.begin(open_browser=open_browser)
-    _PENDING_WECHAT[state] = flow
+    _PENDING_WECHAT[state] = {"flow": flow, "url": url}
     return {"state": state, "authorize_url": url}
 
 
@@ -659,6 +748,68 @@ def wechat_poll(state: str = Query(...)):
         log.warning("微信登录后同步失败：%s", e)
     _PENDING_WECHAT.pop(state, None)
     return {"status": "ok", "account": _account_view(acc)}
+
+
+@app.get("/api/v1/auth/wechat/qr")
+def wechat_qr(state: str = Query(...)):
+    """把微信授权链接渲染成二维码 PNG（data URI），供面板图形化展示。"""
+    item = _PENDING_WECHAT.get(state)
+    if not item:
+        raise HTTPException(404, "state 不存在或已过期，请重新获取授权链接")
+    url = item.get("url")
+    if not url:
+        raise HTTPException(400, "该 state 没有可用的授权链接")
+    try:
+        img = qrcode.make(url, box_size=8, border=2)
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"二维码生成失败：{e}")
+    return {
+        "state": state,
+        "qr_png": f"data:image/png;base64,{b64}",
+        "authorize_url": url,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 管理员登录（单管理员：用户名/密码）
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/admin/login")
+def admin_login(payload: dict = Body(...)):
+    user = (payload or {}).get("username")
+    pw = (payload or {}).get("password")
+    if not user or not pw:
+        raise HTTPException(400, "缺少 username / password")
+    if user != _admin_user or not (_admin_pass_hash and srv_auth.verify_password(pw, _admin_pass_hash)):
+        raise HTTPException(401, "用户名或密码错误")
+    token = srv_auth.make_token(_admin_user)
+    needs = _load_settings().get("admin_needs_change", False)
+    return {"token": token, "user": _admin_user, "needs_change": needs}
+
+
+@app.post("/api/v1/admin/password")
+def admin_change_password(payload: dict = Body(...)):
+    global _admin_pass_hash
+    old = (payload or {}).get("old_password")
+    new = (payload or {}).get("new_password")
+    if not old or not new:
+        raise HTTPException(400, "缺少 old_password / new_password")
+    if not (_admin_pass_hash and srv_auth.verify_password(old, _admin_pass_hash)):
+        raise HTTPException(400, "旧密码错误")
+    s = _load_settings()
+    s["admin_pass_hash"] = srv_auth.hash_password(new)
+    s["admin_needs_change"] = False
+    _save_settings(s)
+    _admin_pass_hash = s["admin_pass_hash"]
+    return {"ok": True, "message": "密码已修改，请重新登录"}
+
+
+@app.get("/api/v1/admin/apikey")
+def admin_apikey():
+    """返回当前对外 API Key（仅管理员可见）。"""
+    return {"api_key": _api_key, "hint": "调用 /api/v1/* 时通过 Authorization: Bearer / X-Api-Key / ?api_key= 携带"}
 
 
 # ---------------------------------------------------------------------------
@@ -695,12 +846,18 @@ def monitor_check():
 @app.get("/api/v1/settings")
 def get_settings():
     s = _load_settings()
+    api_key = _api_key or s.get("api_key") or ""
+    masked = (api_key[:7] + "****" + api_key[-4:]) if len(api_key) > 11 else (api_key or "未设置")
     return {
         "openai_base_url": s.get("openai_base_url", cfg.OPENAI_COMPATIBLE_BASE_URL),
         "openai_model": s.get("openai_model", cfg.OPENAI_COMPATIBLE_MODEL),
         "openai_configured": bool(s.get("openai_api_key")),
         "points_per_second": s.get("points_per_second", cfg.POINTS_PER_SECOND),
         "monitor_interval": s.get("monitor_interval", _monitor.interval),
+        "admin_user": _admin_user,
+        "admin_needs_change": s.get("admin_needs_change", False),
+        "api_key_masked": masked,
+        "api_key_set": bool(api_key),
     }
 
 
@@ -710,6 +867,14 @@ def update_settings(payload: dict = Body(...)):
     for k in ("openai_base_url", "openai_api_key", "openai_model", "points_per_second", "monitor_interval"):
         if k in payload and payload[k] is not None:
             s[k] = payload[k]
+    # 显式重设对外 API Key（或清空后由下次启动重新生成）
+    if "api_key" in payload and payload["api_key"]:
+        s["api_key"] = payload["api_key"]
+        global _api_key
+        _api_key = s["api_key"]
+    if payload.get("regenerate_api_key"):
+        s["api_key"] = srv_auth.new_api_key()
+        _api_key = s["api_key"]
     _save_settings(s)
     # 若设置了监控间隔，立即对下一次巡检生效
     if s.get("monitor_interval"):
@@ -722,18 +887,133 @@ def update_settings(payload: dict = Body(...)):
         "openai_configured": bool(s.get("openai_api_key")),
         "points_per_second": s.get("points_per_second", cfg.POINTS_PER_SECOND),
         "monitor_interval": _monitor.interval,
+        "api_key": _api_key,
     }
 
 
 # ---------------------------------------------------------------------------
 # 生成（对外开放接口）
 # ---------------------------------------------------------------------------
+def _extract_prompt(p: dict) -> Optional[str]:
+    """兼容多种写法：prompt / text / input / q / content / messages[].content。"""
+    for k in ("prompt", "text", "input", "prompt_text", "q", "content"):
+        if p.get(k):
+            return str(p[k])
+    msgs = p.get("messages")
+    if isinstance(msgs, list):
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("content"):
+                return str(m["content"])
+    return None
+
+
+def _adapt_generate_payload(p: dict, kind: str) -> dict:
+    """把多兼容格式的请求体归一化为本项目内部字段。
+
+    兼容：
+      - prompt 别名：text / input / q / content / messages
+      - model 别名：model_key / model_name / model_id
+      - account 别名：account_id / account_name
+      - 图片 size "1024x1024" → width/height；n → count
+      - 视频 seconds 别名 → duration
+    """
+    p = dict(p or {})
+    out = dict(p)
+    prompt = _extract_prompt(p)
+    if prompt is not None:
+        out["prompt"] = prompt
+    for src, dst in (
+        ("model_key", "model"),
+        ("model_name", "model"),
+        ("model_id", "model"),
+        ("account_id", "account"),
+        ("account_name", "account"),
+    ):
+        if p.get(src):
+            out[dst] = p[src]
+    if kind == "image" and p.get("size"):
+        m = re.match(r"(\d+)[xX](\d+)", str(p["size"]))
+        if m:
+            out["width"] = int(m.group(1))
+            out["height"] = int(m.group(2))
+    if p.get("n"):
+        try:
+            out["count"] = int(p["n"])
+        except (TypeError, ValueError):
+            pass
+    if kind == "video" and p.get("seconds"):
+        try:
+            out["duration"] = int(p["seconds"])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _scan_model_constraints(cfg_raw: Any) -> dict:
+    """从模型的 baseConfig 中尽力提取动态约束（不同模型字段差异大，best-effort）。"""
+    if isinstance(cfg_raw, str):
+        try:
+            cfg_raw = _json.loads(cfg_raw)
+        except Exception:  # noqa: BLE001
+            return {}
+    if not isinstance(cfg_raw, dict):
+        return {}
+    flat: dict = {}
+
+    def walk(d, pre=""):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                walk(v, (pre + "." + str(k)).lower() if pre else str(k).lower())
+        elif isinstance(d, list):
+            for i in d:
+                walk(i, pre)
+        else:
+            flat[pre] = d
+
+    walk(cfg_raw)
+    out: dict = {}
+    for k, v in flat.items():
+        if isinstance(v, (int, float)) and any(x in k for x in ("maxduration", "maxsecond")):
+            out["max_segment_seconds"] = max(int(out.get("max_segment_seconds", 0)), int(v))
+        if "durations" in k or "durationlist" in k or "supportduration" in k:
+            if isinstance(v, list):
+                nums = [int(x) for x in v if str(x).isdigit()]
+                if nums:
+                    out["allowed_durations"] = nums
+        if isinstance(v, (int, float)) and any(
+            x in k for x in ("powerpersecond", "pointspersecond", "costpersecond", "pricepersecond")
+        ):
+            out["points_per_second"] = float(v)
+    return out
+
+
+def _resolve_video_constraints(model_key: Optional[str]) -> dict:
+    """给定视频模型，从账号池里任一账号的模型清单中解析其动态约束。"""
+    if not model_key:
+        return {}
+    for acc in _store.list():
+        if not acc.access_token:
+            continue
+        try:
+            with _client_for(acc) as c:
+                snap = c.compute_model_usability()
+        except Exception:  # noqa: BLE001
+            continue
+        for m in snap.get("models", {}).get("video", []):
+            key = m.get("model_key") or m.get("name")
+            if key != model_key:
+                continue
+            return _scan_model_constraints(m.get("config"))
+    return {}
+
+
 @app.post("/api/v1/generate/image")
 def generate_image(payload: dict = Body(...)):
     """提交图片生成任务（交叉选号 + 真正调用 MCP 图片工具）。
 
     设置 dry_run=true 可只做选号+参数校验不真正消耗。
     """
+    payload = _adapt_generate_payload(payload, "image")
     account = payload.get("account")
     if account:
         acc = _store.get(account)
@@ -835,6 +1115,7 @@ def generate_video(payload: dict = Body(...)):
     说明：bridge 网关有 WAF，实际生成走 MCP 视频工具（call_tool）。
     若未指定 tool，会自动从工具列表探测一个视频生成工具；探测/调用失败会返回清晰错误。
     """
+    payload = _adapt_generate_payload(payload, "video")
     try:
         req = VideoGenerateRequest(
             **{k: v for k, v in payload.items() if k in VideoGenerateRequest.__dataclass_fields__}
@@ -920,6 +1201,7 @@ def generate_audio(payload: dict = Body(...)):
 
     设置 dry_run=true 可只做选号+参数校验不真正消耗。
     """
+    payload = _adapt_generate_payload(payload, "audio")
     account = payload.get("account")
     if account:
         acc = _store.get(account)
@@ -1049,14 +1331,17 @@ def generate_video_split(payload: dict = Body(...)):
       - 若已配置 OpenAI 兼容 API（设置页），由它创意拆条（如 5+5+5 / 9+4+1+1 秒）；
       - 否则确定性均分；
       - 之后按各账号剩余积分为每段贪心分配账号（一个账号可承接多段）。
+    动态约束：若指定 model，会自动读取该模型的真实配置（单段最长时长、允许的时长档位、
+    每积分消耗），据此规划，避免不同模型「配置不同」导致拆条不合规范。
     返回每个片段的生成结果（url），可在本地用 ffmpeg 拼接。
     """
+    payload = _adapt_generate_payload(payload, "video")
     prompt = payload.get("prompt")
     if not prompt:
         raise HTTPException(400, "缺少 prompt")
     total = int(payload.get("duration") or 15)
-    if total <= 0 or total > 30:
-        raise HTTPException(400, "duration 需为 1~30 的整数（秒）")
+    if total <= 0 or total > 120:
+        raise HTTPException(400, "duration 需为 1~120 的整数（秒）")
 
     settings = _load_settings()
     pps = float(
@@ -1064,6 +1349,11 @@ def generate_video_split(payload: dict = Body(...)):
         or settings.get("points_per_second")
         or cfg.POINTS_PER_SECOND
     )
+
+    # 动态约束：按模型真实配置覆盖 max_segment / allowed_durations / pps
+    constraints = _resolve_video_constraints(payload.get("model"))
+    if constraints.get("points_per_second"):
+        pps = constraints["points_per_second"]
 
     # 构建 OpenAI 兼容客户端（未配置则不走 LLM，回退均分）
     llm_client = None
@@ -1083,7 +1373,7 @@ def generate_video_split(payload: dict = Body(...)):
     if not accts:
         raise HTTPException(400, "账号池为空，请先添加并登录账号")
 
-    plan = planner.plan(prompt, total, accts, pps)
+    plan = planner.plan(prompt, total, accts, pps, constraints=constraints)
     plan_segments, assign_err = assign_accounts(plan, accts, pps)
 
     if bool(payload.get("dry_run")):
@@ -1091,6 +1381,7 @@ def generate_video_split(payload: dict = Body(...)):
             "ok": assign_err is None,
             "dry_run": True,
             "points_per_second": pps,
+            "constraints": constraints,
             "openai_enabled": llm_client is not None,
             "assign_error": assign_err,
             "plan": plan.to_dict(),

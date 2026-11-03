@@ -120,3 +120,16 @@ POINTS_PER_SECOND = float(os.environ.get("LIBLIB_POINTS_PER_SECOND", "10"))
 
 # 账号类型展示标签（VIP / 免费），避免展示「免费/副卡」这类内部组合
 ACCOUNT_TYPE_LABEL = {"member": "VIP", "vip": "VIP", "free": "免费", "unknown": "未知"}
+
+# ---------------------------------------------------------------------------
+# 面板管理员 & 对外 API Key 鉴权（公网部署必备）
+# ---------------------------------------------------------------------------
+# 单管理员账号（可改）。首次运行未配置时用默认 admin/admin，并提示修改。
+ADMIN_USER = os.environ.get("LIBLIB_ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("LIBLIB_ADMIN_PASSWORD", "admin")
+# 对外 API Key：未配置时由程序首次启动自动生成并持久化到 settings.json
+API_KEY = os.environ.get("LIBLIB_API_KEY", "")
+# 会话令牌/API Key 签名密钥（未配置则每次启动随机；用 env 可固定）
+AUTH_SECRET = os.environ.get("LIBLIB_AUTH_SECRET", "")
+# 是否强制鉴权（设为 0 可临时关闭，仅建议本地调试）
+REQUIRE_AUTH = os.environ.get("LIBLIB_REQUIRE_AUTH", "1") != "0"

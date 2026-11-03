@@ -184,40 +184,8 @@ curl -X POST "http://127.0.0.1:8000/api/v1/generate/video" \
 > 关键词识别覆盖绝大多数会员专属模型；若某模型实际被拒，会记入该账号的
 > `model_usable` 缓存（运行时学习），越用越准。
 
-旧版单账号接口（无账号池）：
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/health` | 健康检查 + 登录态 |
-| POST | `/auth/phone/send-code` | 下发验证码 `{phone}` |
-| POST | `/auth/phone/login` | 登录 `{phone, code}` |
-| GET | `/auth/wechat/login` | 返回 `{state, auth_url}`，扫码用 |
-| GET | `/auth/wechat/callback` | OAuth 回调（微信扫码后浏览器跳转至此） |
-| GET | `/auth/wechat/status?state=` | 轮询登录状态 |
-| GET | `/me` | 当前登录信息 |
-| GET | `/mcp/tools` | 列出 MCP 工具 |
-| POST | `/mcp/tools/call` | 调用工具 `{name, arguments}` |
-| POST | `/mcp` | 透传任意 MCP JSON-RPC `{method, params}` |
-| POST | `/openapi` | 透传 OpenAPI REST（需 `LIBTV_ACCESS_KEY`） |
-| POST | `/auth/logout` | 注销 |
-
-典型自动化调用链：
-
-```bash
-# 1) 启动后先登录（微信）：拿到 auth_url，扫码，轮询状态
-curl "http://127.0.0.1:8000/auth/wechat/login"
-# 浏览器打开返回的 auth_url 用微信扫码 → 自动跳回 /auth/wechat/callback
-curl "http://127.0.0.1:8000/auth/wechat/status?state=<state>"
-
-# 2) 之后任意创作能力
-curl -X POST "http://127.0.0.1:8000/mcp/tools"
-curl -X POST "http://127.0.0.1:8000/mcp/tools/call" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"generate_video","arguments":{...}}'
-```
-
-> 服务本身**无独立账号体系**，依赖本机凭据文件。请仅在可信网络 / 本机暴露，
-> 切勿把 `/auth/wechat/callback` 等接口公开到公网。
+> **遗留单账号透传模式（无账号池）**：如需把本机单个 liblib 凭据以 MCP / OpenAPI 直接透传，
+> 可改用 `uvicorn liblib2api.server:app --port 8000`（实现见 `server.py`）。新部署建议使用上面的多账号面板。
 
 ---
 
