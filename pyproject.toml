@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liblib2api"
+version = "0.1.0"
+description = "liblib.tv 登录模块（手机号验证码 / 微信扫码）+ 自动化接入层（MCP / OpenAPI + FastAPI）"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+liblib2api = "liblib2api.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["liblib2api*"]

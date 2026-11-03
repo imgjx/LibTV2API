@@ -1,0 +1,10 @@
+{
+  "mirror": {
+    "url": "https://gh.0044888.xyz/github.com/imgjx/LibTV2API",
+    "remote": "origin",
+    "branch": "main",
+    "token_note": "鉴权 token 已配置在 git remote（见本机 .git/config 的 remote.origin.url），不会被提交到仓库。如需把明文 token 也写进本文件并提交，请先到下方 unblock 链接将该 secret 加入仓库白名单，再重新填入 token 字段。",
+    "token_unblock_url": "https://github.com/imgjx/LibTV2API/security/secret-scanning/unblock-secret/3LaMUxefHVCxAzWQPPE4GizBIeH",
+    "note": "统一 mirror（数据自管）。提交方式与 GitHub 同理：git push origin main。"
+  }
+}

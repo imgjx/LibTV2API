@@ -1,0 +1,16 @@
+# 凭据（含令牌，切勿提交）
+.libtv/
+credentials.json
+*.credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# 环境变量
+.env

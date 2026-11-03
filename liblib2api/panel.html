@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liblib2API · 团队账号池面板</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#1e222b;--line:#2a2f3a;--txt:#e6e9ef;--mut:#9aa3b2;
+--acc:#4f8cff;--acc2:#3a6fd8;--ok:#37d39b;--warn:#f0b429;--bad:#ef5b6b;--vip:#c084fc;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--acc);text-decoration:none}
+header{display:flex;align-items:center;gap:12px;padding:14px 22px;background:var(--panel);border-bottom:1px solid var(--line)}
+header h1{font-size:17px;margin:0;font-weight:600}
+header .ver{color:var(--mut);font-size:12px}
+nav{display:flex;gap:4px;padding:0 14px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+nav button{background:none;border:none;color:var(--mut);padding:11px 14px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent}
+nav button.active{color:var(--txt);border-bottom-color:var(--acc)}
+main{padding:18px 22px;max-width:1180px;margin:0 auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.card h2{margin:0 0 12px;font-size:15px;font-weight:600}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+label{display:block;font-size:12px;color:var(--mut);margin:0 0 4px}
+input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:7px;padding:8px 10px;font-size:13px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+button.primary{background:var(--acc);color:#fff;border:none;border-radius:7px;padding:9px 16px;cursor:pointer;font-size:13px}
+button.ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:8px 13px;cursor:pointer;font-size:13px}
+button.danger{background:transparent;color:var(--bad);border:1px solid var(--bad);border-radius:7px;padding:6px 10px;cursor:pointer;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--mut);font-weight:500;font-size:12px}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+.b-member{background:rgba(192,132,252,.16);color:var(--vip)}
+.b-free{background:rgba(154,163,178,.16);color:var(--mut)}
+.b-alive{background:rgba(55,211,155,.16);color:var(--ok)}
+.b-dead{background:rgba(239,91,107,.16);color:var(--bad)}
+.b-sub{background:rgba(79,140,255,.16);color:var(--acc)}
+.b-ok{background:rgba(55,211,155,.16);color:var(--ok)}
+.b-no{background:rgba(239,91,107,.16);color:var(--bad)}
+.muted{color:var(--mut)}
+.small{font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.model{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px}
+.model .nm{font-weight:600;font-size:13px;display:flex;justify-content:space-between;gap:6px}
+.model .meta{color:var(--mut);font-size:11px;margin-top:5px}
+.model img{width:40px;height:40px;border-radius:6px;object-fit:cover;float:right}
+pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:340px}
+.kpi{display:flex;gap:14px;flex-wrap:wrap}
+.kpi div{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 14px;min-width:120px}
+.kpi b{display:block;font-size:20px}
+.kpi span{color:var(--mut);font-size:12px}
+.hidden{display:none}
+.tag{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin:2px 3px 0 0;font-size:11px;color:var(--mut)}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--line);padding:12px 16px;border-radius:9px;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:380px;z-index:50}
+.toptab{display:flex;gap:6px;margin-bottom:10px}
+.toptab button{background:var(--panel2);border:1px solid var(--line);color:var(--mut);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:13px}
+.toptab button.active{color:#fff;border-color:var(--acc);background:var(--acc2)}
+.media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:10px}
+.media-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px}
+.media-card video,.media-card img{max-width:100%;border-radius:6px;display:block}
+.media-card audio{width:100%}
+</style>
+</head>
+<body>
+<header>
+  <h1>Liblib2API</h1><span class="ver">团队账号池面板 · v0.3.0</span>
+  <span class="ver" id="health"></span>
+</header>
+<nav>
+  <button data-tab="accounts" class="active">账号池</button>
+  <button data-tab="models">模型可用性</button>
+  <button data-tab="playground">Playground</button>
+  <button data-tab="split">视频拆分</button>
+  <button data-tab="monitor">活性监控</button>
+  <button data-tab="settings">设置</button>
+</nav>
+<main>
+  <!-- 账号池 -->
+  <section id="tab-accounts">
+    <div class="card">
+      <h2>账号池（团队成员会员/额度包）</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button class="primary" onclick="loadAccounts()">刷新</button>
+        <button class="ghost" onclick="showAddPhone()">+ 手机号登录</button>
+        <button class="ghost" onclick="showAddWechat()">+ 微信扫码</button>
+        <button class="ghost" onclick="showImport()">导入 JSON</button>
+        <button class="ghost" onclick="exportAccounts()">导出 JSON</button>
+        <button class="ghost" onclick="syncAll()">全部同步</button>
+        <button class="ghost" onclick="checkinAll()">全部签到</button>
+      </div>
+      <div id="addPhone" class="hidden card" style="background:var(--panel2)">
+        <div class="row">
+          <div><label>手机号</label><input id="p_phone" placeholder="13800138000"></div>
+          <div><label>代理(可选)</label><input id="p_proxy" placeholder="http://ip:port"></div>
+          <div><label>备注</label><input id="p_note" placeholder="副卡/主卡"></div>
+          <div><label>&nbsp;</label><button class="primary" onclick="sendCode()">发验证码</button></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div><label>验证码</label><input id="p_code" placeholder="6位验证码"></div>
+          <div><label>&nbsp;</label><button class="primary" onclick="phoneLogin()">登录并识别类型</button></div>
+        </div>
+      </div>
+      <div id="addWechat" class="hidden card" style="background:var(--panel2)">
+        <button class="primary" onclick="wechatAuth()">获取扫码链接</button>
+        <div id="wxbox" class="small muted" style="margin-top:8px"></div>
+      </div>
+      <div id="importBox" class="hidden card" style="background:var(--panel2)">
+        <label>账号 JSON（含 accounts 数组）或粘贴 raw 文本</label>
+        <textarea id="importText" rows="5" style="width:100%"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" onclick="importAccounts()">导入并自动识别类型</button>
+        </div>
+      </div>
+      <div id="accountsTable"></div>
+    </div>
+  </section>
+
+  <!-- 模型可用性 -->
+  <section id="tab-models" class="hidden">
+    <div class="card">
+      <h2>模型可用性（按账号识别，免费版用不了的会标红）</h2>
+      <div class="row">
+        <div><label>账号</label><select id="m_account"></select></div>
+        <div><label>类型</label><select id="m_kind"><option value="all">全部</option><option value="video">视频</option><option value="image">图片</option></select></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="loadModels()">查询</button></div>
+        <div><label>&nbsp;</label><label><input type="checkbox" id="m_usable"> 只看可用</label></div>
+      </div>
+      <div id="modelInfo" class="small muted" style="margin:8px 0"></div>
+      <div id="modelsGrid" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- Playground：图片/视频/音频统一在线试用 -->
+  <section id="tab-playground" class="hidden">
+    <div class="card">
+      <h2>在线 Playground（图片 / 视频 / 音频统一试用）</h2>
+      <div class="toptab" id="pgType">
+        <button data-k="video" class="active" onclick="setPg('video')">视频</button>
+        <button data-k="image" onclick="setPg('image')">图片</button>
+        <button data-k="audio" onclick="setPg('audio')">音频</button>
+      </div>
+      <div class="row">
+        <div style="flex:1;min-width:300px"><label>提示词 prompt</label><textarea id="pg_prompt" rows="2" style="width:100%" placeholder="一只猫在星空下奔跑"></textarea></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>模型/工具(可选)</label><input id="pg_model" placeholder="留空=自动选" style="width:200px"></div>
+        <div><label>指定账号(可选)</label><input id="pg_account" placeholder="留空=交叉选号" style="width:160px"></div>
+        <div><label>选号策略</label><select id="pg_strategy"><option value="balanced">均衡</option><option value="least_used">最少使用</option><option value="most_points">积分最多</option><option value="vip_preferred">VIP优先</option></select></div>
+      </div>
+      <!-- 视频专属参数 -->
+      <div class="row" id="pg_video_opts" style="margin-top:8px">
+        <div><label>时长(秒)</label><select id="pg_dur"><option>5</option><option>10</option><option selected>15</option><option>30</option></select></div>
+        <div><label>分辨率</label><select id="pg_res"><option>480p</option><option selected>720p</option><option>1080p</option><option>2k</option><option>4k</option></select></div>
+        <div><label>格式</label><select id="pg_fmt"><option>mp4</option><option>webm</option><option>mov</option><option>gif</option></select></div>
+        <div><label>帧率</label><select id="pg_fps"><option>24</option><option>25</option><option selected>30</option></select></div>
+        <div><label>比例</label><select id="pg_ar"><option value="">默认</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>21:9</option></select></div>
+      </div>
+      <!-- 图片专属参数 -->
+      <div class="row" id="pg_image_opts" style="margin-top:8px;display:none">
+        <div><label>宽</label><input id="pg_w" type="number" value="1024" style="width:80px"></div>
+        <div><label>高</label><input id="pg_h" type="number" value="1024" style="width:80px"></div>
+        <div><label>格式</label><select id="pg_ifmt"><option>png</option><option>jpg</option><option>webp</option></select></div>
+      </div>
+      <!-- 音频专属参数 -->
+      <div class="row" id="pg_audio_opts" style="margin-top:8px;display:none">
+        <div><label>时长(秒)</label><select id="pg_adur"><option>5</option><option>10</option><option selected>15</option><option>30</option><option>60</option></select></div>
+        <div><label>格式</label><select id="pg_afmt"><option>mp4</option><option>wav</option><option>mp3</option></select></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label>&nbsp;</label><label><input type="checkbox" id="pg_dry"> 仅预览参数(dry_run)</label></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="pgGen()">生成</button></div>
+        <div><label>&nbsp;</label><button class="ghost" onclick="pgTools()">探测可用工具</button></div>
+      </div>
+      <div id="pgToolsBox" class="small muted" style="margin-top:8px"></div>
+      <div id="pgResult" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <!-- 视频拆分生成 -->
+  <section id="tab-split" class="hidden">
+    <div class="card">
+      <h2>视频拆分生成（多账号接力，解决单账号积分不够）</h2>
+      <p class="small muted">长视频拆成多段（如 5+5+5 / 9+4+1+1 秒），每段交给积分够的账号接力生成，本地用 ffmpeg 拼接。已配置 OpenAI 兼容 API 时由它创意拆条，否则均分。</p>
+      <div class="row">
+        <div style="flex:1;min-width:300px"><label>提示词 prompt</label><textarea id="s_prompt" rows="2" style="width:100%" placeholder="一只猫在星空下奔跑，镜头从特写拉到全景"></textarea></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>总时长(秒)</label><input id="s_dur" type="number" value="15" style="width:90px"></div>
+        <div><label>模型(可选)</label><input id="s_model" placeholder="留空=自动" style="width:160px"></div>
+        <div><label>分辨率</label><select id="s_res"><option>480p</option><option selected>720p</option><option>1080p</option><option>2k</option><option>4k</option></select></div>
+        <div><label>格式</label><select id="s_fmt"><option>mp4</option><option>webm</option><option>mov</option><option>gif</option></select></div>
+        <div><label>帧率</label><select id="s_fps"><option>24</option><option>25</option><option selected>30</option></select></div>
+        <div><label>比例</label><select id="s_ar"><option value="">默认</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>21:9</option></select></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>每积分消耗(可选)</label><input id="s_pps" type="number" value="10" style="width:90px"></div>
+        <div><label>&nbsp;</label><label><input type="checkbox" id="s_dry"> 仅规划+分配(dry_run)</label></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="splitGen()">拆分生成</button></div>
+      </div>
+      <div id="sResult" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <!-- 监控 -->
+  <section id="tab-monitor" class="hidden">
+    <div class="card">
+      <h2>账号活性监控（每 10 分钟巡检 + 自动签到）</h2>
+      <div class="row">
+        <button class="primary" onclick="monitorCheck()">立即巡检一次</button>
+        <button class="ghost" onclick="monitorStatus()">查看监控状态</button>
+      </div>
+      <div id="monitorBox" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="hidden">
+    <div class="card">
+      <h2>设置（OpenAI 兼容 API / 每积分消耗 / 监控间隔）</h2>
+      <p class="small muted">OpenAI 兼容 API 用于「视频拆分」的创意拆条（任意兼容 /v1/chat/completions 的服务：OpenAI、DeepSeek、通义、本地 Ollama 等）。密钥仅保存在本机 settings.json（权限 0600）。</p>
+      <div class="row">
+        <div style="flex:1;min-width:280px"><label>Base URL</label><input id="set_base" style="width:100%" placeholder="https://api.openai.com/v1"></div>
+        <div><label>模型</label><input id="set_model" placeholder="gpt-4o-mini" style="width:160px"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div style="flex:1;min-width:280px"><label>API Key</label><input id="set_key" type="password" style="width:100%" placeholder="sk-...（留空=不修改/使用已存）"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>每积分消耗(点/秒)</label><input id="set_pps" type="number" value="10" style="width:120px"></div>
+        <div><label>监控间隔(秒)</label><input id="set_int" type="number" value="600" style="width:120px"></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="saveSettings()">保存设置</button></div>
+        <div><label>&nbsp;</label><button class="ghost" onclick="loadSettings()">读取当前</button></div>
+      </div>
+      <div id="setBox" class="small muted" style="margin-top:8px"></div>
+    </div>
+  </section>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+<script>
+const API="/api/v1";
+let PG_TYPE="video";
+function toast(m,ok=true){const t=document.getElementById('toast');t.textContent=m;t.className='toast';if(!ok)t.style.borderColor='var(--bad)';t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),3500);}
+async function api(path,opt={}){const r=await fetch(API+path,Object.assign({headers:{'Content-Type':'application/json'}},opt));let j=null;try{j=await r.json();}catch(e){}
+  if(!r.ok){toast((j&&(j.detail||j.error))||('HTTP '+r.status),false);throw new Error('api err');}return j;}
+function tab(n){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===n));
+  document.querySelectorAll('main section').forEach(s=>s.classList.add('hidden'));
+  document.getElementById('tab-'+n).classList.remove('hidden');
+  if(n==='accounts')loadAccounts();if(n==='models')fillAccounts('m_account');if(n==='monitor')monitorStatus();if(n==='settings')loadSettings();}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
+
+async function loadHealth(){try{const h=await api('/accounts');document.getElementById('health').textContent='· 账号 '+h.accounts.length+' 个';}catch(e){}}
+
+async function loadAccounts(){const j=await api('/accounts');const tb=document.getElementById('accountsTable');
+  if(!j.accounts.length){tb.innerHTML='<p class="muted">暂无账号。点「手机号登录 / 微信扫码 / 导入」添加，登录后会自动识别类型。</p>';return;}
+  let h='<table><thead><tr><th>账号</th><th>类型</th><th>昵称</th><th>积分</th><th>免费算力</th><th>活性</th><th>可用模型</th><th>签到</th><th>代理</th><th>操作</th></tr></thead><tbody>';
+  for(const a of j.accounts){
+    const label=a.account_type_label||(a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知');
+    const tb_=label==='VIP'?'<span class="badge b-member">VIP</span>':label==='免费'?'<span class="badge b-free">免费</span>':'<span class="badge b-free">未知</span>';
+    const alive=a.alive===true?'<span class="badge b-alive">在线</span>':a.alive===false?'<span class="badge b-dead">失效</span>':'<span class="badge b-free">未检</span>';
+    const sub=a.is_sub?' <span class="badge b-sub">副卡</span>':'';
+    h+=`<tr><td>${a.account}${sub}</td><td>${tb_}</td><td>${a.nickname||'-'}</td><td>${a.points??'-'}</td><td>${a.free_power??'-'}</td><td>${alive}</td><td>${a.model_usable_count}/${a.model_total_count}</td><td>${a.last_checkin||'-'}</td><td>${a.proxy?a.proxy.slice(0,18)+'…':'-'}</td>
+    <td><button class="danger" onclick="setProxy('${a.account}')">代理</button> <button class="danger" onclick="syncOne('${a.account}')">同步</button> <button class="danger" onclick="del('${a.account}')">删</button></td></tr>`;
+  }
+  h+='</tbody></table>';tb.innerHTML=h;}
+
+async function fillAccounts(sel){const j=await api('/accounts');const s=document.getElementById(sel);s.innerHTML=j.accounts.map(a=>`<option value="${a.account}">${a.account}（${a.account_type_label||a.account_type||'?'}${a.is_member?'·VIP':''}）</option>`).join('');}
+
+function showAddPhone(){toggle('addPhone');} function showAddWechat(){toggle('addWechat');} function showImport(){toggle('importBox');}
+function toggle(id){document.getElementById(id).classList.toggle('hidden');}
+async function sendCode(){const phone=document.getElementById('p_phone').value;if(!phone)return toast('请填手机号',false);
+  await api('/auth/phone/send-code',{method:'POST',body:JSON.stringify({phone,proxy:document.getElementById('p_proxy').value||null})});toast('验证码已下发');}
+async function phoneLogin(){const phone=document.getElementById('p_phone').value,code=document.getElementById('p_code').value;
+  await api('/auth/phone/login',{method:'POST',body:JSON.stringify({phone,code,proxy:document.getElementById('p_proxy').value||null,note:document.getElementById('p_note').value})});
+  toast('登录成功，已自动识别类型');loadAccounts();}
+async function wechatAuth(){const j=await api('/auth/wechat/authorize?open_browser=false');
+  document.getElementById('wxbox').innerHTML=`授权链接：<a href="${j.authorize_url}" target="_blank">${j.authorize_url}</a> · state=${j.state}<br>扫码后点此轮询：<button class="ghost" onclick="wechatPoll('${j.state}')">我已扫码</button>`;}
+async function wechatPoll(state){const j=await api('/auth/wechat/poll?state='+state);if(j.status==='pending')return toast('尚未扫码，稍后再试');toast('微信登录成功');loadAccounts();}
+async function importAccounts(){const t=document.getElementById('importText').value;
+  await api('/accounts/import',{method:'POST',body:JSON.stringify({raw:t})});toast('导入完成，已自动识别类型');loadAccounts();fillAccounts('m_account');}
+async function exportAccounts(){const r=await fetch(API+'/accounts/export');const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='liblib-accounts.json';a.click();toast('已导出');}
+async function syncAll(){await api('/accounts/sync-all',{method:'POST'});toast('已同步全部');loadAccounts();}
+async function syncOne(acc){await api('/accounts/'+encodeURIComponent(acc)+'/sync',{method:'POST'});toast('已同步 '+acc);loadAccounts();}
+async function checkinAll(){const j=await api('/accounts/checkin-all',{method:'POST'});toast('签到完成');}
+async function del(acc){if(!confirm('删除账号 '+acc+' ?'))return;await api('/accounts/'+encodeURIComponent(acc),{method:'DELETE'});toast('已删除');loadAccounts();}
+async function setProxy(acc){const p=prompt('设置代理（留空清除）',(await api('/accounts')).accounts.find(x=>x.account===acc)?.proxy||'');
+  await api('/accounts/'+encodeURIComponent(acc)+'/proxy',{method:'POST',body:JSON.stringify({proxy:p||null})});toast('代理已更新');loadAccounts();}
+
+async function loadModels(){const acc=document.getElementById('m_account').value;const kind=document.getElementById('m_kind').value;const usable=document.getElementById('m_usable').checked;
+  const j=await api(`/accounts/${encodeURIComponent(acc)}/models?kind=${kind}&usable_only=${usable}`);
+  document.getElementById('modelInfo').innerHTML=`账号类型：<b>${j.account_type}</b> · 模型 ${j.count} 个 · 当日免费权益模型：${j.free_benefit_keys.join(', ')||'无'}`;
+  const g=document.getElementById('modelsGrid');
+  g.innerHTML=j.models.map(m=>{const u=m.usable;const badge=u?'<span class="badge b-ok">可用</span>':'<span class="badge b-no">不可用</span>';
+    const vip=m.requires_membership?'<span class="tag">会员专属</span>':'';
+    return `<div class="model"><img src="${m.cover_url||''}" onerror="this.style.display='none'"><div class="nm">${m.name} ${badge}</div>
+    <div class="meta">${m.kind} · ${m.category||''} ${vip}<br>key: ${m.model_key||'-'}</div>
+    <div>${(m.labels||[]).map(l=>`<span class="tag">${l}</span>`).join('')}</div></div>`;}).join('');}
+
+// ---------- Playground ----------
+function setPg(k){PG_TYPE=k;document.querySelectorAll('#pgType button').forEach(b=>b.classList.toggle('active',b.dataset.k===k));
+  document.getElementById('pg_video_opts').style.display=k==='video'?'flex':'none';
+  document.getElementById('pg_image_opts').style.display=k==='image'?'flex':'none';
+  document.getElementById('pg_audio_opts').style.display=k==='audio'?'flex':'none';}
+async function pgTools(){const k=PG_TYPE;const j=await api('/tools?kind='+k);
+  document.getElementById('pgToolsBox').innerHTML=`推荐工具：<b>${j.recommended_tool||'无'}</b> · 共 ${j.count} 个${j.tags?'':''}<br>`+
+    (j.tools||[]).map(t=>'<span class="tag">'+t.name+'</span>').join(' ');}
+async function pgGen(){const k=PG_TYPE;const body={prompt:document.getElementById('pg_prompt').value,model:document.getElementById('pg_model').value||null,
+  account:document.getElementById('pg_account').value||null,strategy:document.getElementById('pg_strategy').value,dry_run:document.getElementById('pg_dry').checked};
+  if(k==='video'){body.duration=+document.getElementById('pg_dur').value;body.resolution=document.getElementById('pg_res').value;body.format=document.getElementById('pg_fmt').value;body.fps=+document.getElementById('pg_fps').value;body.aspect_ratio=document.getElementById('pg_ar').value||null;}
+  if(k==='image'){body.width=+document.getElementById('pg_w').value;body.height=+document.getElementById('pg_h').value;body.format=document.getElementById('pg_ifmt').value;}
+  if(k==='audio'){body.duration=+document.getElementById('pg_adur').value;body.format=document.getElementById('pg_afmt').value;}
+  const j=await api('/generate/'+k,{method:'POST',body:JSON.stringify(body)});
+  document.getElementById('pgResult').innerHTML=renderGen(j);}
+
+function renderGen(j){let head=`<div class="kpi"><div><b>${j.account||'-'}</b><span>选用账号</span></div>`+
+  (j.selection_reason?`<div><b>${(j.selection_reason||'').slice(0,30)}</b><span>选号原因</span></div>`:'')+
+  (j.tool?`<div><b>${j.tool}</b><span>工具</span></div>`:'')+`</div>`;
+  let media='';
+  const res=j.result;
+  if(res&&res.url){media=renderMedia(res.url,kindOf(res));}
+  return head+(media?'<div class="media-grid">'+media+'</div>':'')+`<pre>${JSON.stringify(j,null,2)}</pre>`;}
+function kindOf(res){if(res.media_type)return res.media_type;
+  const f=(res.format||'').toLowerCase();if(['wav','mp3','m4a'].includes(f))return 'audio';if(['png','jpg','jpeg','webp'].includes(f))return 'image';return 'video';}
+function renderMedia(url,kind){const tag=kind==='image'?'<img src="'+url+'">':kind==='audio'?'<audio src="'+url+'" controls></audio>':'<video src="'+url+'" controls></video>';
+  return '<div class="media-card">'+tag+'<div class="small muted">'+kind+'</div></div>';}
+
+// ---------- 视频拆分 ----------
+async function splitGen(){const body={prompt:document.getElementById('s_prompt').value,duration:+document.getElementById('s_dur').value,
+  model:document.getElementById('s_model').value||null,resolution:document.getElementById('s_res').value,format:document.getElementById('s_fmt').value,
+  fps:+document.getElementById('s_fps').value,aspect_ratio:document.getElementById('s_ar').value||null,
+  points_per_second:+document.getElementById('s_pps').value||null,dry_run:document.getElementById('s_dry').checked};
+  const j=await api('/generate/video/split',{method:'POST',body:JSON.stringify(body)});
+  let h='';
+  if(j.assign_error)h+=`<p class="small" style="color:var(--bad)">分配提示：${j.assign_error}</p>`;
+  h+=`<p class="small muted">来源：${j.openai_enabled?'OpenAI兼容创意拆条':'确定性均分'} · 每积分消耗 ${j.points_per_second} 点</p>`;
+  const plan=j.plan;
+  h+=`<div class="kpi">`+plan.segments.map(s=>`<div><b>${s.seconds}s</b><span>${s.account||'无账号'}</span></div>`).join('')+`</div>`;
+  let grid='';
+  for(const seg of (j.segments||[])){const r=seg.result;
+    let card=`<div class="media-card"><div class="small">${seg.seconds}s · ${seg.account||'-'} · ${seg.tool||''}</div>`;
+    if(r&&r.url){card+=renderMedia(r.url,'video');}else if(seg.error){card+=`<div class="small" style="color:var(--bad)">${seg.error}</div>`;}else{card+=`<div class="small muted">${r?JSON.stringify(r).slice(0,120):'无结果'}</div>`;}
+    card+='</div>';grid+=card;}
+  if(grid)h+=`<div class="media-grid">${grid}</div>`;
+  if(j.ffmpeg_hint)h+=`<p class="small muted">${j.ffmpeg_hint}</p>`;
+  h+=`<pre>${JSON.stringify(j,null,2)}</pre>`;
+  document.getElementById('sResult').innerHTML=h;}
+
+// ---------- 监控 ----------
+async function monitorStatus(){const j=await api('/monitor/status');document.getElementById('monitorBox').innerHTML=
+  `<p class="small muted">运行中：${j.running} · 间隔：${j.interval}s · 上次巡检：${j.last_run_at?new Date(j.last_run_at*1000).toLocaleString():'未'}</p>`+
+  (j.results.length?`<table><thead><tr><th>账号</th><th>在线</th><th>类型</th><th>积分</th><th>免费算力</th><th>已签到</th><th>错误</th></tr></thead><tbody>`+
+  j.results.map(r=>`<tr><td>${r.account}</td><td>${r.ok?'是':'否'}</td><td>${r.account_type||'-'}</td><td>${r.points??'-'}</td><td>${r.free_power??'-'}</td><td>${r.checked_in?'是':'否'}</td><td>${r.error||'-'}</td></tr>`).join('')+'</tbody></table>':'<p class="muted">暂无巡检记录。</p>');}
+async function monitorCheck(){const j=await api('/monitor/check',{method:'POST'});monitorStatus();toast('巡检完成');}
+
+// ---------- 设置 ----------
+async function loadSettings(){const j=await api('/settings');
+  document.getElementById('set_base').value=j.openai_base_url||'';
+  document.getElementById('set_model').value=j.openai_model||'';
+  document.getElementById('set_pps').value=j.points_per_second??10;
+  document.getElementById('set_int').value=j.monitor_interval??600;
+  document.getElementById('setBox').textContent='API Key 已配置：'+(j.openai_configured?'是':'否')+'（出于安全不回显明文）';}
+async function saveSettings(){const body={openai_base_url:document.getElementById('set_base').value||null,
+  openai_model:document.getElementById('set_model').value||null,
+  openai_api_key:document.getElementById('set_key').value||null,
+  points_per_second:+document.getElementById('set_pps').value||null,
+  monitor_interval:+document.getElementById('set_int').value||null};
+  const j=await api('/settings',{method:'POST',body:JSON.stringify(body)});
+  document.getElementById('setBox').textContent='已保存。API Key 配置：'+(j.openai_configured?'是':'否');toast('设置已保存');}
+
+loadHealth();loadAccounts();
+</script>
+</body>
+</html>
