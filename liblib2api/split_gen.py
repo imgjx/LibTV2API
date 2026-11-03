@@ -1,19 +1,24 @@
-"""视频拆分生成（多账号接力）。
+"""算力均摊（跨账号分段生成）。
 
 背景
 ----
-一个长视频（比如 15 秒）往往需要较多算力点，单个账号积分可能不够。但团队有多个账号，
-于是把一个长视频拆成若干段（5+5+5 秒、或 9+4+1+1 秒 …），每段交给「积分够用的账号」接力生成，
-最后在本地用 ffmpeg 拼接成完整视频。
+一个长视频（比如 15 秒）往往需要较多算力点。若**没有任何一个账号能独立生成完整时长**，
+但团队有多个账号，则把该视频按算力拆成若干段（5+5+5 秒、或 9+4+1+1 秒 …），
+每段交给「额度够用的账号」分段生成，最后在本地用 ffmpeg 拼接成完整视频。
 
-拆条策略（可由 OpenAI 兼容 API 规划，也可确定性兜底）：
-  - 调用方给出：总时长 D、提示词 prompt、以及账号池（每个账号剩余积分）
+启用条件（重要）
+----------------
+算力均摊是**兜底**手段：只有当所有账号都无法独立覆盖总时长时才启用。
+若存在单个账号额度足够，则优先由该账号一次性生成，避免不必要的分段与拼接。
+
+分段策略（可由 OpenAI 兼容 API 规划，也可确定性兜底）：
+  - 调用方给出：总时长 D、提示词 prompt、以及账号池（每个账号剩余算力点）
   - 规划器（OpenAI 兼容）产出 N 段，每段含 {seconds, prompt(承接上一段的画面描述)}
-  - 若未配置 API 或调用失败，回退为「尽量均分」的确定性拆法
-  - 之后按每个账号的剩余积分为每段贪心分配账号（一个账号可承接多段，只要其总积分够）
+  - 若未配置 API 或调用失败，回退为「尽量均分」的确定性分段法
+  - 之后按每个账号的剩余算力点为每段贪心分配账号（一个账号可承接多段，只要其总够用）
 
-OpenAI 兼容 API 仅用于「创意拆条」（决定分段与每段画面），不接触任何 liblib 凭据；
-账号积分、生成调用都走本地账号池与 MCP。
+OpenAI 兼容 API 仅用于「分段规划」（决定分段与每段画面），不接触任何 liblib 凭据；
+账号算力点、生成调用都走本地账号池与 MCP。
 """
 from __future__ import annotations
 
@@ -31,9 +36,29 @@ import liblib2api.config as cfg
 MAX_SEGMENT_SECONDS = 30
 
 
+def single_account_feasible(
+    accounts: list[dict],
+    total_duration: int,
+    points_per_second: float = cfg.POINTS_PER_SECOND,
+) -> tuple[bool, Optional[dict]]:
+    """判断是否有**单个**账号能独立生成完整时长。
+
+    返回 ``(是否可行, 该账号信息)``。可行时优先单账号一次生成，
+    不触发算力均摊；不可行时才需要分段接力。
+    """
+    need = float(total_duration) * float(points_per_second)
+    best: Optional[dict] = None
+    for acc in accounts or []:
+        points = float(acc.get("points") or 0)
+        if points >= need:
+            if best is None or points > float(best.get("points") or 0):
+                best = acc
+    return (best is not None), best
+
+
 @dataclass
 class Segment:
-    """拆条后的一段：时长 + 该段画面描述（承接上文）。"""
+    """分段后的一段：时长 + 该段画面描述（承接上文）。"""
 
     seconds: int
     prompt: str
@@ -155,9 +180,9 @@ class VideoSplitPlanner:
             else f" 每段秒数为不超过 {max_seg} 的整数。"
         )
         system = (
-            "你是一个视频分镜拆分器。用户要生成一段总时长固定的视频，但单个账号算力点不足，"
-            "需要用团队多个账号接力分段生成。请把它拆成若干连续镜头片段，让相邻片段在画面上能衔接。"
-            "只输出严格的 JSON，不要任何解释。"
+            "你是一个视频分镜规划器。用户要生成一段总时长固定的视频，但没有任何单个账号的"
+            "算力点能覆盖完整时长，需要团队多个账号分段接力完成。请把它拆成若干连续镜头片段，"
+            "让相邻片段在画面上能衔接。只输出严格的 JSON，不要任何解释。"
         )
         user = (
             f"总时长：{total_duration} 秒。\n"
@@ -223,15 +248,15 @@ def assign_accounts(
     accounts: list[dict],
     points_per_second: float = cfg.POINTS_PER_SECOND,
 ) -> tuple[list[Segment], Optional[str]]:
-    """为每段贪心分配「积分够用」的账号。
+    """为每段贪心分配「算力点够用」的账号。
 
     accounts: [{account, points, _obj?}]；返回 (带 account 的 segments, 错误信息)。
-    一个账号可承接多段（只要其剩余积分累计够用）；按剩余积分递减消耗。
+    一个账号可承接多段（只要其剩余算力点累计够用）；按剩余算力点递减消耗。
     返回前会修改传入 accounts 的 points（扣减）。
     """
     # 复制剩余额度，保留余额
     pool = [{"account": a["account"], "points": float(a.get("points") or 0)} for a in accounts]
-    # 按积分降序，便于优先用大额度账号兜底
+    # 按算力点降序，便于优先用大额度账号兜底
     pool.sort(key=lambda x: x["points"], reverse=True)
     errors = []
     for seg in plan.segments:
@@ -251,3 +276,7 @@ def assign_accounts(
     if errors:
         return plan.segments, "；".join(errors)
     return plan.segments, None
+
+
+#: 中性命名别名：算力均摊（跨账号分段生成）规划器
+ComputeBalancePlanner = VideoSplitPlanner

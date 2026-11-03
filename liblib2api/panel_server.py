@@ -42,7 +42,21 @@ import liblib2api.config as cfg
 from liblib2api import auth as srv_auth
 from liblib2api.accounts import Account, AccountStore
 from liblib2api.credentials import CredentialStore
+from liblib2api.analytics import team_stats
 from liblib2api.exceptions import ApiError, AuthError, ModelUnavailableError
+from liblib2api.expiry import expiry_info
+from liblib2api.notify import (
+    EVENT_ACCOUNT_INVALID,
+    EVENT_CLAIM_FAILED,
+    EVENT_DAILY_DIGEST,
+    EVENT_MEMBER_EXPIRED,
+    EVENT_MEMBER_EXPIRING,
+    EVENT_POINTS_LOW,
+    EVENT_QUOTA_EXHAUSTED,
+    EVENT_QUOTA_NEAR_LIMIT,
+    NotifyCenter,
+    NotifyMessage,
+)
 from liblib2api.media import (
     ImageGenerateRequest,
     AudioGenerateRequest,
@@ -52,10 +66,12 @@ from liblib2api.media import (
 )
 from liblib2api.monitor import AccountMonitor
 from liblib2api.selector import AccountSelector
+from liblib2api.teams import TeamStore
 from liblib2api.split_gen import (
     OpenAICompatibleClient,
     VideoSplitPlanner,
     assign_accounts,
+    single_account_feasible,
 )
 from liblib2api.video_output import VideoGenerateRequest, build_arguments, normalize_result
 from liblib2api.webapi import WebApiClient
@@ -66,13 +82,14 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("liblib2api.panel")
 
 app = FastAPI(
-    title="Liblib2API",
-    description="liblib 多账号管理面板 + 图片/视频/音频生成开放接口（团队自用）",
-    version="0.4.0",
+    title="LibTV-Team",
+    description="团队账号统一管理面板 + 图片/视频/音频生成开放接口（团队自用）",
+    version="0.5.0",
 )
 
 _store = AccountStore()
-_selector = AccountSelector(_store)
+_teams = TeamStore()
+_selector = AccountSelector(_store, _teams)
 _monitor = AccountMonitor(_store, interval=int(os.environ.get("LIBLIB_MONITOR_INTERVAL", "600")))
 
 _PENDING_WECHAT: dict[str, dict] = {}
@@ -106,6 +123,10 @@ def _save_settings(s: dict) -> None:
         os.chmod(cfg.SETTINGS_FILE, 0o600)
     except Exception:  # noqa: BLE001
         pass
+
+
+# 通知中心（邮件 / 企业微信机器人 / 控制台），配置存 settings.json
+_notifier = NotifyCenter(_load_settings, _save_settings)
 
 
 def _type_label(at: Optional[str]) -> str:
@@ -175,6 +196,9 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001
         return await call_next(request)
     # 登录接口无需鉴权
     if path == "/api/v1/admin/login":
+        return await call_next(request)
+    # 使用条例：首次进入面板时需在登录前阅读，故不强制鉴权
+    if path in ("/api/v1/terms", "/api/v1/terms/accept"):
         return await call_next(request)
     if path.startswith("/api/v1/"):
         if not _check_request_auth(request):
@@ -267,9 +291,45 @@ def _client_for(acc: Account) -> WebApiClient:
     return WebApiClient(access_token=acc.access_token, webid=acc.webid, proxy=acc.proxy)
 
 
+def _record_quota_usage(account: str, points: float) -> None:
+    """按账号所属成员记账额度消耗（团队额度限制）。"""
+    try:
+        _teams.consume(account, float(points or 0))
+    except Exception as e:  # noqa: BLE001
+        log.debug("额度记账失败（%s）：%s", account, e)
+
+
+def _current_pps() -> float:
+    """当前每算力点可生成的秒数（用于额度估算）。"""
+    try:
+        return float(_load_settings().get("points_per_second") or cfg.POINTS_PER_SECOND)
+    except Exception:  # noqa: BLE001
+        return float(cfg.POINTS_PER_SECOND)
+
+
 def _account_view(acc: Account) -> dict:
     usable = acc.model_usable or {}
     usable_count = sum(1 for v in usable.values() if v)
+    # 团队 / 成员 / 额度（平台原生无团队功能，这里做统一纳管）
+    member = _teams.member_of_account(acc.account)
+    team = _teams.get_team(acc.team_id) if acc.team_id else None
+    if member is not None and member.team_id:
+        team = _teams.get_team(member.team_id) or team
+    quota: Optional[dict] = None
+    if member is not None:
+        member.rollover()
+        quota = {
+            "member_id": member.id,
+            "member_name": member.name,
+            "limit": member.quota_limit,
+            "used": member.quota_used,
+            "remaining": member.quota_remaining(),
+            "unlimited": member.quota_unlimited,
+            "exhausted": member.quota_exhausted(),
+            "reset_date": member.quota_reset_date,
+        }
+    # 会员到期提醒
+    expiry = expiry_info(acc.member_until, warn_days=cfg.MEMBER_EXPIRY_WARN_DAYS)
     return {
         "account": acc.account,
         "nickname": acc.nickname,
@@ -291,10 +351,23 @@ def _account_view(acc: Account) -> dict:
         "alive_error": acc.alive_error,
         "last_alive_check": acc.last_alive_check,
         "last_sync": acc.last_sync,
-        "last_checkin": acc.last_checkin,
+        "last_claim": acc.last_claim,
+        "last_checkin": acc.last_claim,  # 兼容旧字段名
         "proxy": acc.proxy,
         "status": acc.status,
         "note": acc.note,
+        "remark": acc.note,
+        "team_id": team.id if team else acc.team_id,
+        "team_name": team.name if team else None,
+        "member_id": member.id if member else acc.member_id,
+        "member_display_name": member.name if member else None,
+        "quota": quota,
+        "member_until_days": expiry.get("days_left"),
+        "member_expiry_level": expiry.get("level"),
+        "member_expiry_text": expiry.get("level_text"),
+        "member_until_text": expiry.get("member_until_text"),
+        "expiring_soon": expiry.get("expiring_soon", False),
+        "expired": expiry.get("expired", False),
         "request_count": acc.request_count,
         "error_count": acc.error_count,
         "last_used_at": acc.last_used_at,
@@ -409,6 +482,43 @@ def health():
 @app.get("/api/v1/accounts")
 def list_accounts():
     return {"accounts": [_account_view(a) for a in _store.list()]}
+
+
+# 注意：静态路径必须注册在 "/api/v1/accounts/{account}" 通配路由之前，
+# 否则会被通配路由抢先匹配（表现为「账号不存在」）。
+@app.get("/api/v1/accounts/expiring")
+def expiring_accounts(days: int = Query(cfg.MEMBER_EXPIRY_WARN_DAYS, ge=1, le=365)):
+    """会员即将到期提醒（团队管理核心提醒）。"""
+    warn = cfg.MEMBER_EXPIRY_WARN_DAYS
+    items = []
+    for acc in _store.list():
+        info = expiry_info(acc.member_until, warn_days=warn)
+        left = info.get("days_left")
+        if left is None or left > days:
+            continue
+        view = _account_view(acc)
+        items.append({
+            "account": acc.account,
+            "nickname": acc.nickname,
+            "remark": acc.note,
+            "team_name": view.get("team_name"),
+            "member_display_name": view.get("member_display_name"),
+            "member_until": acc.member_until,
+            "member_until_text": info.get("member_until_text"),
+            "days_left": left,
+            "level": info.get("level"),
+            "level_text": info.get("level_text"),
+            "expired": info.get("expired"),
+            "points": acc.points,
+        })
+    items.sort(key=lambda x: (x["days_left"] if x["days_left"] is not None else 9999))
+    return {"days": days, "warn_days": warn, "count": len(items), "items": items}
+
+
+@app.get("/api/v1/accounts/export")
+def export_accounts(path: Optional[str] = Query(None, description="可选：写入指定文件路径")):
+    """导出账号池 JSON（可选写入文件）。"""
+    return _export_accounts(path)
 
 
 @app.get("/api/v1/accounts/{account}")
@@ -526,8 +636,8 @@ def account_models(
 # ---------------------------------------------------------------------------
 # 导入 / 导出
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/accounts/export")
-def export_accounts(path: Optional[str] = Query(None, description="可选：写入指定文件路径")):
+# 导出路由已前置到 "/api/v1/accounts/{account}" 之前注册，避免被通配路由遮蔽。
+def _export_accounts(path: Optional[str] = Query(None, description="可选：写入指定文件路径")):
     text = _store.export(path)
     if path:
         return {"exported_to": path, "count": len(_store)}
@@ -595,27 +705,29 @@ def seed_from_local_credential(note: str = "") -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 签到 / 积分
+# 每日权益领取 / 积分
 # ---------------------------------------------------------------------------
-@app.post("/api/v1/accounts/{account}/checkin")
-def checkin(account: str):
+@app.post("/api/v1/accounts/{account}/claim")
+def claim_daily_bonus(account: str):
+    """领取该账号当日的免费算力权益。"""
     acc = _store.get(account)
     if not acc:
         raise HTTPException(404, "账号不存在")
     with _client_for(acc) as c:
-        ok = c.daily_checkin()
+        ok = c.daily_claim()
         fp = c.free_power()
     today = time.strftime("%Y-%m-%d")
     _store.update(
         account,
-        last_checkin=today if ok else acc.last_checkin,
+        last_claim=today if ok else acc.last_claim,
         free_power=fp.get("freePower"),
     )
-    return {"checked_in": ok, "free_power": fp.get("freePower"), "status": fp.get("status")}
+    return {"claimed": ok, "checked_in": ok, "free_power": fp.get("freePower"), "status": fp.get("status")}
 
 
-@app.post("/api/v1/accounts/checkin-all")
-def checkin_all():
+@app.post("/api/v1/accounts/claim-all")
+def claim_all_daily_bonus():
+    """为账号池中全部账号领取当日免费算力权益。"""
     results = []
     today = time.strftime("%Y-%m-%d")
     for acc in _store.list():
@@ -623,17 +735,448 @@ def checkin_all():
             continue
         try:
             with _client_for(acc) as c:
-                ok = c.daily_checkin()
+                ok = c.daily_claim()
                 fp = c.free_power()
             _store.update(
                 acc.account,
-                last_checkin=today if ok else acc.last_checkin,
+                last_claim=today if ok else acc.last_claim,
                 free_power=fp.get("freePower"),
             )
             results.append({"account": acc.account, "ok": ok, "free_power": fp.get("freePower")})
         except Exception as e:  # noqa: BLE001
             results.append({"account": acc.account, "ok": False, "error": str(e)[:160]})
+    # 领取结果摘要通知
+    ok_count = sum(1 for r in results if r.get("ok"))
+    fail = [r["account"] for r in results if not r.get("ok")]
+    _notify(
+        EVENT_DAILY_DIGEST,
+        f"当日免费算力权益领取：成功 {ok_count}/{len(results)}",
+        ("失败账号：" + "、".join(fail[:20])) if fail else "全部账号领取成功。",
+        level="warning" if fail else "info",
+        dedup_key=f"daily_digest:{today}",
+    )
+    if fail:
+        _notify(
+            EVENT_CLAIM_FAILED,
+            f"权益领取失败 {len(fail)} 个账号",
+            "、".join(fail[:20]),
+            level="warning",
+            dedup_key=f"claim_failed:{today}",
+        )
     return {"results": results, "date": today}
+
+
+# 兼容旧路径（等价于「权益领取」）
+@app.post("/api/v1/accounts/{account}/checkin")
+def checkin(account: str):
+    """兼容别名：等价于 :func:`claim_daily_bonus`。"""
+    return claim_daily_bonus(account)
+
+
+@app.post("/api/v1/accounts/checkin-all")
+def checkin_all():
+    """兼容别名：等价于 :func:`claim_all_daily_bonus`。"""
+    return claim_all_daily_bonus()
+
+
+# ---------------------------------------------------------------------------
+# 团队与成员（liblib 平台原生无团队功能，这里提供统一纳管层）
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/teams")
+def list_teams():
+    """团队列表（含成员、额度概览与绑定账号）。"""
+    teams = []
+    for t in _teams.list_teams():
+        members = [m for m in (_teams.get_member(mid) for mid in t.member_ids) if m]
+        accounts = []
+        for m in members:
+            for acc_id in m.account_ids:
+                acc = _store.get(acc_id)
+                if acc:
+                    accounts.append(_account_view(acc))
+        teams.append({
+            "id": t.id,
+            "name": t.name,
+            "note": t.note,
+            "member_count": len(members),
+            "account_count": len(accounts),
+            "members": [m.to_dict() for m in members],
+            "accounts": accounts,
+            "created_at": t.created_at,
+            "updated_at": t.updated_at,
+        })
+    return {"teams": teams, "count": len(teams)}
+
+
+@app.post("/api/v1/teams")
+def create_team(payload: dict = Body(...)):
+    """创建团队。"""
+    name = (payload or {}).get("name")
+    if not name:
+        raise HTTPException(400, "缺少 name")
+    team = _teams.add_team(name=name, note=(payload or {}).get("note") or "")
+    return {"ok": True, "team": team.to_dict()}
+
+
+@app.patch("/api/v1/teams/{team_id}")
+def update_team(team_id: str, payload: dict = Body(...)):
+    """更新团队名称 / 备注。"""
+    fields = {k: v for k, v in (payload or {}).items() if k in ("name", "note")}
+    team = _teams.update_team(team_id, **fields)
+    if not team:
+        raise HTTPException(404, "团队不存在")
+    return {"ok": True, "team": team.to_dict()}
+
+
+@app.delete("/api/v1/teams/{team_id}")
+def delete_team(team_id: str):
+    """删除团队（成员一并移除，账号解除归属）。"""
+    if not _teams.remove_team(team_id):
+        raise HTTPException(404, "团队不存在")
+    for acc in _store.list():
+        if acc.team_id == team_id:
+            _store.update(acc.account, team_id=None, member_id=None)
+    return {"ok": True}
+
+
+@app.get("/api/v1/members")
+def list_all_members():
+    """全部成员与额度概览。"""
+    return {"members": _teams.quota_status(), "count": len(_teams)}
+
+
+@app.get("/api/v1/teams/{team_id}/members")
+def list_team_members(team_id: str):
+    """某团队下的成员列表。"""
+    if not _teams.get_team(team_id):
+        raise HTTPException(404, "团队不存在")
+    members = _teams.list_members(team_id)
+    return {"members": [m.to_dict() for m in members], "count": len(members)}
+
+
+@app.post("/api/v1/teams/{team_id}/members")
+def add_team_member(team_id: str, payload: dict = Body(...)):
+    """在团队下新增成员，可同时设置每日额度上限。"""
+    name = (payload or {}).get("name")
+    if not name:
+        raise HTTPException(400, "缺少 name")
+    limit = (payload or {}).get("quota_limit")
+    member = _teams.add_member(
+        team_id,
+        name=name,
+        note=(payload or {}).get("note") or "",
+        quota_limit=float(limit) if limit is not None else None,
+        identity=(payload or {}).get("identity"),
+    )
+    if not member:
+        raise HTTPException(404, "团队不存在")
+    return {"ok": True, "member": member.to_dict()}
+
+
+@app.patch("/api/v1/members/{member_id}")
+def update_member(member_id: str, payload: dict = Body(...)):
+    """更新成员资料（姓名 / 备注 / 额度上限 / 身份标识）。"""
+    fields = {
+        k: v for k, v in (payload or {}).items()
+        if k in ("name", "note", "quota_limit", "identity")
+    }
+    if "quota_limit" in fields and fields["quota_limit"] is not None:
+        fields["quota_limit"] = float(fields["quota_limit"])
+    member = _teams.update_member(member_id, **fields)
+    if not member:
+        raise HTTPException(404, "成员不存在")
+    return {"ok": True, "member": member.to_dict()}
+
+
+@app.post("/api/v1/members/{member_id}/quota")
+def set_member_quota(member_id: str, payload: dict = Body(...)):
+    """设置成员每日额度上限（算力点）；传 null 表示不限制。"""
+    payload = payload or {}
+    member = _teams.get_member(member_id)
+    if not member:
+        raise HTTPException(404, "成员不存在")
+    limit = payload.get("quota_limit")
+    if limit is not None:
+        limit = float(limit)
+        if limit < 0:
+            raise HTTPException(400, "quota_limit 不能为负")
+    if payload.get("reset_usage"):
+        member.quota_used = 0.0
+    updated = _teams.update_member(member_id, quota_limit=limit)
+    return {"ok": True, "member": updated.to_dict()}
+
+
+@app.delete("/api/v1/members/{member_id}")
+def delete_member(member_id: str):
+    """删除成员（其账号解除归属，不删除账号本身）。"""
+    member = _teams.get_member(member_id)
+    if not member:
+        raise HTTPException(404, "成员不存在")
+    for acc_id in list(member.account_ids):
+        acc = _store.get(acc_id)
+        if acc:
+            _store.update(acc_id, member_id=None, team_id=None)
+    _teams.remove_member(member_id)
+    return {"ok": True}
+
+
+@app.post("/api/v1/accounts/{account}/assign")
+def assign_account(account: str, payload: dict = Body(...)):
+    """把账号分配给团队成员，并可同时设置备注。
+
+    未显式给出 remark 时，自动填成「<团队>·<成员> 的账号」。
+    传 member_id=null 表示解除归属。
+    """
+    acc = _store.get(account)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    payload = payload or {}
+    member_id = payload.get("member_id")
+    remark = payload.get("remark")
+    if member_id:
+        member = _teams.bind_account(account, member_id)
+        if not member:
+            raise HTTPException(404, "成员不存在")
+        team = _teams.get_team(member.team_id)
+        if remark is None:
+            remark = f"{team.name if team else '团队'}·{member.name} 的账号"
+        _store.update(account, member_id=member.id, team_id=member.team_id, note=remark)
+    else:
+        _teams.unbind_account(account)
+        if remark is not None:
+            _store.update(account, note=remark, member_id=None, team_id=None)
+        else:
+            _store.update(account, member_id=None, team_id=None)
+    return {"ok": True, "account": _account_view(_store.get(account))}
+
+
+@app.post("/api/v1/accounts/{account}/remark")
+def set_account_remark(account: str, payload: dict = Body(...)):
+    """设置账号备注（如「张三团队成员的账号」）。"""
+    acc = _store.get(account)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    remark = str((payload or {}).get("remark") or "")
+    _store.update(account, note=remark)
+    return {"ok": True, "account": _account_view(_store.get(account))}
+
+
+# ---------------------------------------------------------------------------
+# 告警引擎（按规则扫描账号池与成员额度，命中即通知）
+# ---------------------------------------------------------------------------
+def _rule_enabled(event: str) -> bool:
+    rule = _notifier.rules().get(event) or {}
+    return bool(rule.get("enabled"))
+
+
+def _notify(event: str, title: str, body: str, level: str = "info",
+            dedup_key: str = "", force: bool = False) -> list:
+    """发送一条通知（内部 helper）。"""
+    if not force and not _rule_enabled(event):
+        return []
+    msg = NotifyMessage(
+        event=event,
+        title=title,
+        body=body,
+        level=level,
+        dedup_key=dedup_key or f"{event}:{title}",
+    )
+    try:
+        return _notifier.send(msg, force=force)
+    except Exception as e:  # noqa: BLE001
+        log.warning("通知发送异常：%s", e)
+        return []
+
+
+def run_alerts(force: bool = False) -> dict:
+    """扫描账号池与成员额度，按规则发出告警。返回本次命中的告警摘要。"""
+    rules = _notifier.rules()
+    hits: list[dict] = []
+    warn_days = int((rules.get(EVENT_MEMBER_EXPIRING) or {}).get("days") or cfg.MEMBER_EXPIRY_WARN_DAYS)
+    low_threshold = float((rules.get(EVENT_POINTS_LOW) or {}).get("threshold") or 100)
+    near_percent = float((rules.get(EVENT_QUOTA_NEAR_LIMIT) or {}).get("percent") or 90)
+
+    # 1) 会员到期
+    for acc in _store.list():
+        info = expiry_info(acc.member_until, warn_days=warn_days)
+        left = info.get("days_left")
+        label = f"{acc.nickname or acc.account}"
+        if info.get("expired"):
+            hits.append({"event": EVENT_MEMBER_EXPIRED, "account": acc.account,
+                         "title": f"会员已到期：{label}"})
+        elif left is not None and left <= warn_days:
+            hits.append({"event": EVENT_MEMBER_EXPIRING, "account": acc.account,
+                         "title": f"会员即将到期（剩 {left} 天）：{label}"})
+
+    # 2) 账号失效
+    for acc in _store.list():
+        if acc.alive is False:
+            hits.append({"event": EVENT_ACCOUNT_INVALID, "account": acc.account,
+                         "title": f"账号失效：{acc.nickname or acc.account}"})
+
+    # 3) 算力点余额偏低
+    for acc in _store.list():
+        pts = acc.points
+        if pts is not None and float(pts) < low_threshold:
+            hits.append({"event": EVENT_POINTS_LOW, "account": acc.account,
+                         "title": f"算力点余额偏低（{pts}）：{acc.nickname or acc.account}"})
+
+    # 4) 成员额度
+    for m in _teams.list_members():
+        m.rollover()
+        if m.quota_unlimited:
+            continue
+        if m.quota_exhausted():
+            hits.append({"event": EVENT_QUOTA_EXHAUSTED, "account": None,
+                         "title": f"成员额度已用尽：{m.name}"})
+        else:
+            pct = float(m.quota_used) / float(m.quota_limit or 1) * 100
+            if pct >= near_percent:
+                hits.append({"event": EVENT_QUOTA_NEAR_LIMIT, "account": None,
+                             "title": f"成员额度接近上限（{pct:.0f}%）：{m.name}"})
+
+    sent = []
+    for hit in hits:
+        event = hit["event"]
+        body = f"账号：{hit['account']}" if hit.get("account") else "团队成员额度"
+        level = "critical" if event in (EVENT_MEMBER_EXPIRED, EVENT_ACCOUNT_INVALID,
+                                        EVENT_QUOTA_EXHAUSTED) else "warning"
+        records = _notify(event, hit["title"], body, level=level, force=force)
+        sent.append({**hit, "sent": len(records)})
+    return {"checked": len(_store.list()), "hits": sent, "count": len(sent)}
+
+
+@app.post("/api/v1/alerts/scan")
+def api_scan_alerts(payload: dict = Body(default={})):
+    """手动触发一次告警扫描。"""
+    return run_alerts(force=bool((payload or {}).get("force")))
+
+
+# ---------------------------------------------------------------------------
+# 通知中心（邮件 / 企业微信机器人 / 控制台）
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/notify/status")
+def notify_status():
+    """通道状态、告警规则与最近发送记录。"""
+    return {
+        "channels": _notifier.channel_status(),
+        "rules": _notifier.rules(),
+        "config": _notifier.config,
+        "history": _notifier.history_list(30),
+    }
+
+
+@app.post("/api/v1/notify/config")
+def notify_update_config(payload: dict = Body(...)):
+    """保存通知通道配置（邮件 SMTP / 企业微信 Webhook / 控制台）。"""
+    payload = payload or {}
+    cfgd = _notifier.config
+    for ch in ("email", "wecom", "console"):
+        if isinstance(payload.get(ch), dict):
+            merged = dict(cfgd.get(ch) or {})
+            merged.update(payload[ch])
+            cfgd[ch] = merged
+    if isinstance(payload.get("quiet_hours"), dict):
+        merged_q = dict(cfgd.get("quiet_hours") or {})
+        merged_q.update(payload["quiet_hours"])
+        cfgd["quiet_hours"] = merged_q
+    _notifier.save_config(cfgd)
+    return {"ok": True, "config": cfgd}
+
+
+@app.post("/api/v1/notify/rule/{event}")
+def notify_update_rule(event: str, payload: dict = Body(...)):
+    """更新某类告警的规则（启停与阈值）。"""
+    rule = _notifier.update_rule(event, payload or {})
+    return {"ok": True, "event": event, "rule": rule}
+
+
+@app.post("/api/v1/notify/test")
+def notify_test(payload: dict = Body(default={})):
+    """发送测试通知。"""
+    channel = (payload or {}).get("channel") or ""
+    records = _notifier.test(channel)
+    return {"ok": all(r.ok for r in records) if records else False,
+            "results": [r.to_dict() for r in records]}
+
+
+@app.get("/api/v1/notify/history")
+def notify_history(limit: int = Query(50, ge=1, le=200)):
+    """最近的通知发送记录。"""
+    return {"history": _notifier.history_list(limit)}
+
+
+# ---------------------------------------------------------------------------
+# 团队统计（算力点 / 用量 / 排行）
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/stats")
+def api_stats(days: int = Query(cfg.MEMBER_EXPIRY_WARN_DAYS, ge=1, le=365)):
+    """团队统计：总览 + 成员维度 + 账号维度。"""
+    return team_stats(_store, _teams, warn_days=days)
+
+
+@app.get("/api/v1/stats/overview")
+def api_stats_overview():
+    """团队总览指标（轻量）。"""
+    return team_stats(_store, _teams, warn_days=cfg.MEMBER_EXPIRY_WARN_DAYS)["overview"]
+
+
+# ---------------------------------------------------------------------------
+# 使用条例与合规声明（首次进入面板需阅读并同意）
+# ---------------------------------------------------------------------------
+TERMS_VERSION = "1.0"
+TERMS_TITLE = "使用条例与合规声明"
+TERMS_TEXT = """本工具面向团队自用，用于统一管理团队成员各自合法拥有的 liblib 账号。
+
+一、适用范围
+请仅用于你本人与本团队成员已合法拥有的账号；团队账号应来自成员自愿提供并知情的场景。
+
+二、遵守平台规则
+请遵守 liblib.tv 及相关平台的服务条款、计费与频控规则，不做滥用、刷量或绕过平台限制的操作。
+
+三、不做逆向与破解
+本项目仅调用平台对外提供的正常接口与官方授权流程，不用于绕过平台限制、破解付费能力、
+批量注册账号或买卖账号。
+
+四、凭据与隐私
+账号令牌仅存储于运行本程序的本机（权限 0600），不外传、不写日志、不上传至第三方；
+微信扫码走 OAuth 标准流程，手机号验证码由本人接收，本项目不收集密码。
+
+五、团队数据的边界
+平台原生没有团队功能，本项目在官方账号体系之上提供统一管理层（纳管账号、交叉选号、
+额度限制、到期提醒），不修改平台任何机制，所有能力仍受账号自身权限与平台规则约束。
+
+六、风险自担
+所用接口随官方调整可能变动；因不当使用或账号受限造成的后果，由使用者自行承担。
+本项目与 liblib 官方无隶属关系。"""
+
+
+@app.get("/api/v1/terms")
+def get_terms():
+    """使用条例状态与全文。"""
+    s = _load_settings()
+    accepted_at = s.get("terms_accepted_at")
+    version = s.get("terms_version")
+    accepted = bool(accepted_at) and version == TERMS_VERSION
+    return {
+        "version": TERMS_VERSION,
+        "title": TERMS_TITLE,
+        "text": TERMS_TEXT,
+        "accepted": accepted,
+        "accepted_at": accepted_at,
+        "accepted_version": version,
+        "need_accept": not accepted,
+    }
+
+
+@app.post("/api/v1/terms/accept")
+def accept_terms(payload: dict = Body(default={})):
+    """记录使用条例同意状态（写入本机 settings.json）。"""
+    s = _load_settings()
+    s["terms_accepted_at"] = int(time.time())
+    s["terms_version"] = TERMS_VERSION
+    _save_settings(s)
+    return {"ok": True, "version": TERMS_VERSION, "accepted_at": s["terms_accepted_at"]}
 
 
 @app.get("/api/v1/points")
@@ -823,8 +1366,23 @@ def monitor_status():
 @app.post("/api/v1/monitor/check")
 def monitor_check():
     results = _monitor.check_all()
+    # 巡检后按规则扫描并发出告警（会员到期 / 账号失效 / 算力点偏低 / 额度超限）
+    try:
+        alerts = run_alerts()
+    except Exception as e:  # noqa: BLE001
+        alerts = {"count": 0, "hits": [], "error": str(e)}
+    # 权益领取失败的账号单独提醒
+    failed = [r.account for r in results if not r.ok]
+    if failed:
+        _notify(
+            EVENT_CLAIM_FAILED,
+            f"账号巡检异常 {len(failed)} 个",
+            "、".join(failed[:20]),
+            level="warning",
+        )
     return {
         "checked_at": _monitor.last_run_at,
+        "alerts": alerts,
         "results": [
             {
                 "account": r.account,
@@ -1058,6 +1616,7 @@ def generate_image(payload: dict = Body(...)):
 
     acc.record_usage()
     _store.update(acc.account, last_used_at=acc.last_used_at)
+    _record_quota_usage(acc.account, cfg.IMAGE_POINTS_ESTIMATE)
 
     tool = payload.get("tool") or _find_tool(acc.to_credentials(), "image")
     if not tool:
@@ -1160,6 +1719,7 @@ def generate_video(payload: dict = Body(...)):
 
     acc.record_usage()
     _store.update(acc.account, last_used_at=acc.last_used_at)
+    _record_quota_usage(acc.account, (req.duration or 0) * _current_pps())
 
     from liblib2api.client import LiblibClient
 
@@ -1246,6 +1806,7 @@ def generate_audio(payload: dict = Body(...)):
 
     acc.record_usage()
     _store.update(acc.account, last_used_at=acc.last_used_at)
+    _record_quota_usage(acc.account, (req.duration or 0) * _current_pps())
 
     tool = payload.get("tool") or _find_tool(acc.to_credentials(), "audio")
     if not tool:
@@ -1309,9 +1870,9 @@ def list_tools_kind(
 # ---------------------------------------------------------------------------
 # 视频拆分生成（多账号接力）
 # ---------------------------------------------------------------------------
-@app.post("/api/v1/generate/video/split")
-def generate_video_split(payload: dict = Body(...)):
-    """把长视频拆成多段，由多个账号接力生成（解决单账号积分不够的问题）。
+@app.post("/api/v1/generate/video/balance")
+def generate_video_balance(payload: dict = Body(...)):
+    """算力均摊：仅当**没有任何单个账号能独立生成完整时长**时才分段接力。
 
     请求示例：
       {
@@ -1327,13 +1888,14 @@ def generate_video_split(payload: dict = Body(...)):
         "tool": null                    # 可选，显式指定视频工具
       }
 
-    拆条策略：
-      - 若已配置 OpenAI 兼容 API（设置页），由它创意拆条（如 5+5+5 / 9+4+1+1 秒）；
-      - 否则确定性均分；
-      - 之后按各账号剩余积分为每段贪心分配账号（一个账号可承接多段）。
+    行为：
+      - 若存在单个账号算力点足以覆盖总时长 → strategy="single"，由该账号一次生成，
+        不做分段与拼接；
+      - 否则 → strategy="balance"，进入分段接力：先规划分段（可由 OpenAI 兼容 API 规划，
+        否则确定性均分），再按各账号剩余算力点为每段贪心分配账号。
     动态约束：若指定 model，会自动读取该模型的真实配置（单段最长时长、允许的时长档位、
-    每积分消耗），据此规划，避免不同模型「配置不同」导致拆条不合规范。
-    返回每个片段的生成结果（url），可在本地用 ffmpeg 拼接。
+    每积分消耗），据此规划，避免不同模型「配置不同」导致分段不合规范。
+    返回每个分段的生成结果（url），可在本地用 ffmpeg 拼接。
     """
     payload = _adapt_generate_payload(payload, "video")
     prompt = payload.get("prompt")
@@ -1355,6 +1917,26 @@ def generate_video_split(payload: dict = Body(...)):
     if constraints.get("points_per_second"):
         pps = constraints["points_per_second"]
 
+    accts = [
+        {"account": a.account, "points": (a.points or 0) + (a.free_power or 0)}
+        for a in _store.list()
+        if a.status == "active" and a.access_token
+    ]
+    if not accts:
+        raise HTTPException(400, "账号池为空，请先添加并登录账号")
+
+    # ---- 关键判定：是否有单个账号能独立覆盖总时长 ----
+    single_ok, single_acc = single_account_feasible(accts, total, pps)
+    if single_ok:
+        strategy = "single"
+        note = (
+            f"账号 {single_acc['account']} 算力点可独立覆盖 {total} 秒，"
+            "无需均摊，直接由该账号生成"
+        )
+    else:
+        strategy = "balance"
+        note = "没有账号能独立覆盖完整时长，启用算力均摊（分段接力生成）"
+
     # 构建 OpenAI 兼容客户端（未配置则不走 LLM，回退均分）
     llm_client = None
     if settings.get("openai_api_key"):
@@ -1365,14 +1947,6 @@ def generate_video_split(payload: dict = Body(...)):
         )
     planner = VideoSplitPlanner(llm_client)
 
-    accts = [
-        {"account": a.account, "points": (a.points or 0) + (a.free_power or 0)}
-        for a in _store.list()
-        if a.status == "active" and a.access_token
-    ]
-    if not accts:
-        raise HTTPException(400, "账号池为空，请先添加并登录账号")
-
     plan = planner.plan(prompt, total, accts, pps, constraints=constraints)
     plan_segments, assign_err = assign_accounts(plan, accts, pps)
 
@@ -1380,6 +1954,9 @@ def generate_video_split(payload: dict = Body(...)):
         return {
             "ok": assign_err is None,
             "dry_run": True,
+            "strategy": strategy,
+            "note": note,
+            "single_account": single_acc["account"] if single_ok else None,
             "points_per_second": pps,
             "constraints": constraints,
             "openai_enabled": llm_client is not None,
@@ -1393,7 +1970,7 @@ def generate_video_split(payload: dict = Body(...)):
     for seg in plan_segments:
         if not seg.account:
             results.append({"seconds": seg.seconds, "account": None,
-                            "error": "无积分足够的账号可承接该段"})
+                            "error": "无算力点足够的账号可承接该段"})
             continue
         acc = _store.get(seg.account)
         if not acc:
@@ -1441,6 +2018,8 @@ def generate_video_split(payload: dict = Body(...)):
         seg.result = res.to_dict()
         acc.record_usage()
         _store.update(acc.account, last_used_at=acc.last_used_at)
+        # 成员额度记账（按本段时长估算消耗）
+        _record_quota_usage(acc.account, seg.seconds * pps)
         results.append({
             "seconds": seg.seconds,
             "account": seg.account,
@@ -1450,6 +2029,9 @@ def generate_video_split(payload: dict = Body(...)):
 
     return {
         "ok": all(r.get("error") is None for r in results),
+        "strategy": strategy,
+        "note": note,
+        "single_account": single_acc["account"] if single_ok else None,
         "points_per_second": pps,
         "openai_enabled": llm_client is not None,
         "assign_error": assign_err,
@@ -1457,6 +2039,13 @@ def generate_video_split(payload: dict = Body(...)):
         "segments": results,
         "ffmpeg_hint": "本地拼接：ffmpeg -f concat -safe 0 -i list.txt -c copy out.mp4",
     }
+
+
+# 兼容旧路径（等价于「算力均摊」）
+@app.post("/api/v1/generate/video/split")
+def generate_video_split(payload: dict = Body(...)):
+    """兼容别名：等价于 :func:`generate_video_balance`。"""
+    return generate_video_balance(payload)
 
 
 @app.get("/api/v1/mcp/tools")
@@ -1482,7 +2071,7 @@ PANEL_HTML = Path(__file__).parent / "panel.html"
 def panel():
     if PANEL_HTML.exists():
         return PANEL_HTML.read_text(encoding="utf-8")
-    return "<h1>Liblib2API 面板</h1><p>panel.html 未找到</p>"
+    return "<h1>LibTV-Team 面板</h1><p>panel.html 未找到</p>"
 
 
 @app.get("/", response_class=HTMLResponse)

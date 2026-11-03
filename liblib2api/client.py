@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from liblib2api import config as cfg
 from liblib2api.credentials import CredentialStore, Credentials
 from liblib2api.exceptions import NotLoggedInError
 from liblib2api.mcp import McpClient
@@ -44,7 +45,8 @@ class LiblibClient:
             self._mcp = McpClient(
                 store=self.store,
                 credentials=self._credentials,
-                mcp_url=self._mcp_url or "",
+                # 未显式指定时回落到 config 中的默认 MCP 地址
+                mcp_url=self._mcp_url or cfg.LIBTV_MCP_URL,
                 proxy=self._proxy or "",
             )
         return self._mcp

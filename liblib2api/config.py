@@ -1,9 +1,9 @@
-"""Liblib2API 全局配置与常量。
+"""LibTV-Team 全局配置与常量。
 
 所有可调参数均支持环境变量覆盖，便于在不改代码的情况下接入不同环境。
-登录端点（尤其是手机号验证码路径）来自 liblib.tv 前端逆向 + 官方 MCP 规范，
-其中微信扫码走标准 OAuth 2.1 + PKCE（端点可自动发现），手机号端点需按浏览器
-Network 面板核对（见 README「手机号登录端点核验」一节）。
+登录端点遵循 liblib 官方 passport 登录流程与 MCP 规范，其中微信扫码走标准
+OAuth 2.1 + PKCE（端点可自动发现），手机号验证码端点内置于下方常量，
+并可通过环境变量覆盖（详见 README「手机号登录端点」一节）。
 """
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ ACCOUNTS_FILE = Path(
 # 运行设置（OpenAI 兼容 API、每积分消耗等，可由面板持久化）
 SETTINGS_FILE = Path(
     os.environ.get("LIBLIB_SETTINGS_FILE", str(LIBTV_HOME / "settings.json"))
+)
+# 团队与成员数据（平台原生无团队功能，这里做统一纳管）
+TEAMS_FILE = Path(
+    os.environ.get("LIBLIB_TEAMS_FILE", str(LIBTV_HOME / "teams.json"))
 )
 
 # ---------------------------------------------------------------------------
@@ -118,8 +122,18 @@ OPENAI_COMPATIBLE_MODEL = os.environ.get("LIBLIB_OPENAI_MODEL", "gpt-4o-mini")
 # 不同分辨率/模型会有差异，这里给一个可配置的经验值，面板可在「设置」中调整
 POINTS_PER_SECOND = float(os.environ.get("LIBLIB_POINTS_PER_SECOND", "10"))
 
+# 图片生成的额度估算（算力点/张），用于成员额度记账；平台未按张公开计费口径，取经验值
+IMAGE_POINTS_ESTIMATE = float(os.environ.get("LIBLIB_IMAGE_POINTS_ESTIMATE", "10"))
+
 # 账号类型展示标签（VIP / 免费），避免展示「免费/副卡」这类内部组合
 ACCOUNT_TYPE_LABEL = {"member": "VIP", "vip": "VIP", "free": "免费", "unknown": "未知"}
+
+# ---------------------------------------------------------------------------
+# 会员到期提醒（团队管理）
+# ---------------------------------------------------------------------------
+# liblib 平台原生没有团队功能，成员账号到期时间互不相通，这里统一提前提醒，
+# 避免团队额度突然断档。单位：天。
+MEMBER_EXPIRY_WARN_DAYS = int(os.environ.get("LIBLIB_MEMBER_EXPIRY_WARN_DAYS", "30"))
 
 # ---------------------------------------------------------------------------
 # 面板管理员 & 对外 API Key 鉴权（公网部署必备）

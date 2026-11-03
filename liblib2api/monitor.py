@@ -5,7 +5,7 @@
       - 调 user_info 验证 token 是否仍有效（活性探测）
       - 调 member/account 刷新账号类型 / 会员等级 / 到期时间（导入时自动识别也走这里）
       - 调 libtvFreePower 刷新每日免费算力
-      - 若当日尚未签到，触发一次每日登录事件（等价于「进一次网页自动签到」）
+      - 若当日尚未领取权益，触发一次每日事件（发放当日免费算力）
   * 更新每个账号的 alive / alive_error / last_alive_check / account_type 等字段
   * 记录最近一次巡检结果与时间，供面板展示
 
@@ -32,8 +32,14 @@ class CheckResult:
     account_type: Optional[str] = None
     points: Optional[float] = None
     free_power: Optional[float] = None
+    #: 当日权益是否已领取
     checked_in: bool = False
     error: Optional[str] = None
+
+    @property
+    def claimed(self) -> bool:
+        """中性表述别名：等价于 :attr:`checked_in`。"""
+        return self.checked_in
 
 
 class AccountMonitor:
@@ -42,11 +48,11 @@ class AccountMonitor:
         store: AccountStore,
         interval: int = DEFAULT_INTERVAL,
         client_factory: Optional[Callable[[object], WebApiClient]] = None,
-        auto_checkin: bool = True,
+        auto_claim: bool = True,
     ):
         self.store = store
         self.interval = interval
-        self.auto_checkin = auto_checkin
+        self.auto_claim = auto_claim
         self._client_factory = client_factory or self._default_client
         self._stop = False
         self._thread: Optional[threading.Thread] = None
@@ -115,13 +121,13 @@ class AccountMonitor:
             res.error = str(e)
             return res
 
-        # 每日签到：当日未签到则触发（发放免费算力）
-        if self.auto_checkin and acc.last_checkin != today:
+        # 每日权益：当日未领取则触发（发放免费算力）
+        if self.auto_claim and acc.last_claim != today:
             try:
-                ok = client.daily_checkin()
+                ok = client.daily_claim()
                 res.checked_in = bool(ok)
                 if ok:
-                    self.store.update(acc.account, last_checkin=today)
+                    self.store.update(acc.account, last_claim=today)
             except Exception:  # noqa: BLE001
                 res.checked_in = False
         return res

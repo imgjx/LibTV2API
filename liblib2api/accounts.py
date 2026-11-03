@@ -65,15 +65,19 @@ class Account:
     proxy: Optional[str] = None
     # 状态：active | disabled | expired | error
     status: str = "active"
-    # 备注
+    # 备注：如「视频组·张三 的账号」
     note: str = ""
+    # 所属团队 ID（平台原生无团队功能，这里做统一纳管）
+    team_id: Optional[str] = None
+    # 所属成员 ID（团队内的自然人，可对其设置额度限制）
+    member_id: Optional[str] = None
     # 时间戳
     created_at: int = field(default_factory=lambda: int(time.time()))
     updated_at: int = field(default_factory=lambda: int(time.time()))
     # 最后一次积分刷新时间
     last_sync: Optional[int] = None
-    # 最后一次自动签到时间（日期字符串 YYYY-MM-DD）
-    last_checkin: Optional[str] = None
+    # 最后一次权益领取时间（日期字符串 YYYY-MM-DD）
+    last_claim: Optional[str] = None
     # 最后一次活性检查（user_info 探测）时间
     last_alive_check: Optional[int] = None
     # 活性：是否仍可正常调用；None 表示尚未检查过
@@ -121,10 +125,25 @@ class Account:
     def from_dict(cls, data: dict) -> "Account":
         data = dict(data)
         extra = data.pop("extra", {}) or {}
+        # 兼容历史字段名：签到 → 权益领取
+        if "last_checkin" in data:
+            data.setdefault("last_claim", data.get("last_checkin"))
+            data.pop("last_checkin", None)
         known = {f for f in cls.__dataclass_fields__}
         kwargs = {k: v for k, v in data.items() if k in known}
         kwargs["extra"] = extra
         return cls(**kwargs)
+
+    # ----- 兼容别名 -----
+    @property
+    def last_checkin(self) -> Optional[str]:
+        """历史别名：等价于 :attr:`last_claim`（最后一次权益领取时间）。"""
+        return self.last_claim
+
+    @property
+    def remark(self) -> str:
+        """备注（等价于 :attr:`note`）。"""
+        return self.note
 
     # ----- 类型 / 可用性辅助 -----
     def is_member(self) -> bool:

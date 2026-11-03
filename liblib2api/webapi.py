@@ -234,9 +234,9 @@ class WebApiClient:
         ) or {}
         return data.get("modelCards") or []
 
-    # ----- 签到 -----
-    def daily_checkin(self) -> bool:
-        """触发每日登录事件（等价于「每天进一次网页自动签到」）。
+    # ----- 每日权益 -----
+    def daily_claim(self) -> bool:
+        """领取当日免费算力权益（等价于「每天进一次网页自动领取」）。
 
         站点在页面加载时会 POST client/event/report 带 cid=Webid，
         服务端据此发放当日免费算力。这里直接复用该请求。
@@ -251,6 +251,9 @@ class WebApiClient:
             return True
         except ApiError:
             return False
+
+    #: 历史别名（等价于 :meth:`daily_claim`）
+    daily_checkin = daily_claim
 
     # ----- 汇总 -----
     def snapshot(self) -> dict:

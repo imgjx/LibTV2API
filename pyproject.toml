@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "liblib2api"
-version = "0.1.0"
-description = "liblib.tv 登录模块（手机号验证码 / 微信扫码）+ 自动化接入层（MCP / OpenAPI + FastAPI）"
+name = "libtv-team"
+version = "0.5.0"
+description = "团队 liblib 账号统一管理面板：账号池、成员额度、算力均摊、告警通知与对外 API"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
+libtv-team = "liblib2api.cli:main"
 liblib2api = "liblib2api.cli:main"
 
 [tool.setuptools.packages.find]

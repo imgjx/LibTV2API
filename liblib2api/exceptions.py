@@ -3,7 +3,7 @@ from __future__ import annotations
 
 
 class LiblibError(Exception):
-    """所有 Liblib2API 异常的基类。"""
+    """所有 LibTV-Team 异常的基类。"""
 
 
 class ApiError(LiblibError):

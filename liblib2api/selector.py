@@ -14,6 +14,7 @@
   * 活性检查通过（alive != False）—— 未检查过的乐观放行
   * 若指定 model_key：仅保留 can_use(model_key) 为 True 的账号
   * 若指定 require_points：仅保留 points >= 该值
+  * 成员额度：所属成员当日额度已用尽的账号会被跳过（统一管理层面的额度限制）
 
 返回 (account, reason)；无候选时返回 (None, 原因)。
 """
@@ -28,8 +29,24 @@ STRATEGIES = ("balanced", "least_used", "most_points", "vip_preferred")
 
 
 class AccountSelector:
-    def __init__(self, store: AccountStore):
+    def __init__(self, store: AccountStore, team_store=None):
         self.store = store
+        # 团队/成员额度仓库（可选；为 None 时不启用额度限制）
+        self.team_store = team_store
+
+    def _quota_blocked(self, acc: Account) -> Optional[str]:
+        """若该账号所属成员额度已用尽，返回原因；否则 None。"""
+        if self.team_store is None:
+            return None
+        member = self.team_store.member_of_account(acc.account)
+        if member is None:
+            return None
+        member.rollover()
+        if member.quota_exhausted():
+            team = self.team_store.get_team(member.team_id)
+            team_name = team.name if team else "团队"
+            return f"成员「{member.name}」（{team_name}）当日额度已用尽"
+        return None
 
     def _candidates(
         self,
@@ -53,6 +70,8 @@ class AccountSelector:
                 continue
             if require_points is not None and (a.points or 0) < require_points:
                 continue
+            if self._quota_blocked(a):
+                continue
             cands.append(a)
         return cands
 
@@ -75,6 +94,15 @@ class AccountSelector:
                 reason += f"（模型 {model_key} 在当前账号池中均不可用）"
             if require_points:
                 reason += f"（满足积分≥{require_points} 的账号不足）"
+            if self.team_store is not None:
+                blocked = [
+                    self._quota_blocked(a)
+                    for a in self.store.list()
+                    if a.status == "active" and a.access_token and a.alive is not False
+                ]
+                blocked = [b for b in blocked if b]
+                if blocked:
+                    reason += f"（额度限制：{blocked[0]}）"
             return None, reason
 
         now = int(time.time())
