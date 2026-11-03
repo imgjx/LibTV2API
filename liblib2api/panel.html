@@ -68,6 +68,7 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
 </header>
 <nav>
   <button data-tab="accounts" class="active">账号池</button>
+  <button data-tab="login">登录</button>
   <button data-tab="models">模型可用性</button>
   <button data-tab="playground">Playground</button>
   <button data-tab="split">视频拆分</button>
@@ -81,28 +82,10 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
       <h2>账号池（团队成员会员/额度包）</h2>
       <div class="row" style="margin-bottom:12px">
         <button class="primary" onclick="loadAccounts()">刷新</button>
-        <button class="ghost" onclick="showAddPhone()">+ 手机号登录</button>
-        <button class="ghost" onclick="showAddWechat()">+ 微信扫码</button>
         <button class="ghost" onclick="showImport()">导入 JSON</button>
         <button class="ghost" onclick="exportAccounts()">导出 JSON</button>
         <button class="ghost" onclick="syncAll()">全部同步</button>
         <button class="ghost" onclick="checkinAll()">全部签到</button>
-      </div>
-      <div id="addPhone" class="hidden card" style="background:var(--panel2)">
-        <div class="row">
-          <div><label>手机号</label><input id="p_phone" placeholder="13800138000"></div>
-          <div><label>代理(可选)</label><input id="p_proxy" placeholder="http://ip:port"></div>
-          <div><label>备注</label><input id="p_note" placeholder="副卡/主卡"></div>
-          <div><label>&nbsp;</label><button class="primary" onclick="sendCode()">发验证码</button></div>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <div><label>验证码</label><input id="p_code" placeholder="6位验证码"></div>
-          <div><label>&nbsp;</label><button class="primary" onclick="phoneLogin()">登录并识别类型</button></div>
-        </div>
-      </div>
-      <div id="addWechat" class="hidden card" style="background:var(--panel2)">
-        <button class="primary" onclick="wechatAuth()">获取扫码链接</button>
-        <div id="wxbox" class="small muted" style="margin-top:8px"></div>
       </div>
       <div id="importBox" class="hidden card" style="background:var(--panel2)">
         <label>账号 JSON（含 accounts 数组）或粘贴 raw 文本</label>
@@ -112,6 +95,31 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
         </div>
       </div>
       <div id="accountsTable"></div>
+    </div>
+  </section>
+
+  <!-- 登录：面板内直接拉起手机号/微信登录，更方便 -->
+  <section id="tab-login" class="hidden">
+    <div class="card">
+      <h2>添加并登录账号（手机验证码 / 微信扫码）</h2>
+      <p class="small muted">登录后自动识别账号类型（VIP / 免费）并纳入账号池；凭据仅存本机。也可在「账号池」页导入已有账号。</p>
+      <div class="row">
+        <div><label>手机号</label><input id="p_phone" placeholder="13800138000"></div>
+        <div><label>代理(可选)</label><input id="p_proxy" placeholder="http://ip:port"></div>
+        <div><label>备注</label><input id="p_note" placeholder="副卡/主卡"></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="sendCode()">发验证码</button></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>验证码</label><input id="p_code" placeholder="6位验证码"></div>
+        <div><label>&nbsp;</label><button class="primary" onclick="phoneLogin()">登录并识别类型</button></div>
+      </div>
+      <hr style="border-color:var(--line);margin:16px 0">
+      <button class="primary" onclick="wechatAuth()">微信扫码登录（获取链接）</button>
+      <div id="wxbox" class="small muted" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h2>免责声明</h2>
+      <p class="small muted">本项目仅供个人学习研究与团队自用合法自动化，请遵守平台服务条款；账号凭据仅存本机，作者不对不当使用后果负责。面板无独立账号体系，请勿公开到公网。</p>
     </div>
   </section>
 
@@ -236,6 +244,9 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
   </section>
 </main>
 
+<footer style="text-align:center;color:var(--mut);font-size:12px;padding:18px 22px;border-top:1px solid var(--line)">
+  免责声明：本项目仅供个人学习研究与团队自用合法自动化，请遵守平台服务条款；账号凭据仅存本机，作者不对不当使用后果负责。面板无独立账号体系，请勿公开到公网。
+</footer>
 <div class="toast hidden" id="toast"></div>
 <script>
 const API="/api/v1";
@@ -266,16 +277,23 @@ async function loadAccounts(){const j=await api('/accounts');const tb=document.g
 
 async function fillAccounts(sel){const j=await api('/accounts');const s=document.getElementById(sel);s.innerHTML=j.accounts.map(a=>`<option value="${a.account}">${a.account}（${a.account_type_label||a.account_type||'?'}${a.is_member?'·VIP':''}）</option>`).join('');}
 
-function showAddPhone(){toggle('addPhone');} function showAddWechat(){toggle('addWechat');} function showImport(){toggle('importBox');}
+function showImport(){toggle('importBox');}
 function toggle(id){document.getElementById(id).classList.toggle('hidden');}
 async function sendCode(){const phone=document.getElementById('p_phone').value;if(!phone)return toast('请填手机号',false);
   await api('/auth/phone/send-code',{method:'POST',body:JSON.stringify({phone,proxy:document.getElementById('p_proxy').value||null})});toast('验证码已下发');}
 async function phoneLogin(){const phone=document.getElementById('p_phone').value,code=document.getElementById('p_code').value;
   await api('/auth/phone/login',{method:'POST',body:JSON.stringify({phone,code,proxy:document.getElementById('p_proxy').value||null,note:document.getElementById('p_note').value})});
   toast('登录成功，已自动识别类型');loadAccounts();}
+let wxTimer=null;
 async function wechatAuth(){const j=await api('/auth/wechat/authorize?open_browser=false');
-  document.getElementById('wxbox').innerHTML=`授权链接：<a href="${j.authorize_url}" target="_blank">${j.authorize_url}</a> · state=${j.state}<br>扫码后点此轮询：<button class="ghost" onclick="wechatPoll('${j.state}')">我已扫码</button>`;}
-async function wechatPoll(state){const j=await api('/auth/wechat/poll?state='+state);if(j.status==='pending')return toast('尚未扫码，稍后再试');toast('微信登录成功');loadAccounts();}
+  document.getElementById('wxbox').innerHTML=`授权链接：<a href="${j.authorize_url}" target="_blank">${j.authorize_url}</a> · state=${j.state}<br><span id="wxstat" class="muted">等待扫码…（已自动轮询）</span>`;
+  if(wxTimer)clearInterval(wxTimer);
+  wxTimer=setInterval(()=>wechatPoll(j.state),3000);}
+async function wechatPoll(state){let j;try{j=await api('/auth/wechat/poll?state='+state);}catch(e){if(wxTimer){clearInterval(wxTimer);wxTimer=null;}toast('微信登录失败',false);return;}
+  if(j.status==='pending')return;
+  if(wxTimer){clearInterval(wxTimer);wxTimer=null;}
+  if(j.status==='ok'){toast('微信登录成功');loadAccounts();return;}
+  toast('微信登录失败',false);}
 async function importAccounts(){const t=document.getElementById('importText').value;
   await api('/accounts/import',{method:'POST',body:JSON.stringify({raw:t})});toast('导入完成，已自动识别类型');loadAccounts();fillAccounts('m_account');}
 async function exportAccounts(){const r=await fetch(API+'/accounts/export');const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='liblib-accounts.json';a.click();toast('已导出');}

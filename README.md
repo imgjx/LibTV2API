@@ -1,12 +1,22 @@
 # Liblib2API
 
-> 把 **liblib.tv（LibTV）** 的「手机号验证码 / 微信扫码」登录模块抓取并实现为可复用代码，
+> 把 **liblib.tv（LibTV）** 的「手机号验证码 / 微信扫码」登录能力对接并实现为可复用代码，
 > 再以 **MCP / OpenAPI 客户端 + FastAPI 服务** 的形式，供你的自动化工作流稳定接入。
 
 LibTV 自带的自动化（画布节点、剧本等）约束较多、不好用。本项目不依赖它的内置自动化，
 而是**先把登录打通**，拿到你本人账户的令牌，再通过标准 MCP 协议直接调用它暴露的 86 个
 创作工具（画布、图片/视频/音频生成、剧本、剪辑、导出等）——任何能打 HTTP 的调度系统
 （n8n、自研编排、定时脚本）都能接进来。
+
+---
+
+## 免责声明
+
+- 本项目仅供**个人学习研究**与**团队自用**的合法自动化场景，请遵守 liblib.tv 及相关平台的服务条款。
+- 账号凭据（token）仅存储于运行本程序的**本机**，不对外传输、不收集密码、不代你登录。
+- 本项目与 liblib 官方无隶属关系；所用接口随官方调整可能变动，使用风险由使用者自行承担。
+- 请勿用于任何违反平台规则、商用牟利或滥用频控的行为。因不当使用导致的账号封禁、额度损失等后果，作者不承担责任。
+- 面板本身**无独立账号体系**，请仅在可信网络 / 本机暴露，切勿公开到公网。
 
 ---
 
@@ -20,14 +30,14 @@ LibTV 自带的自动化（画布节点、剧本等）约束较多、不好用�
 
 ---
 
-## 2. 鉴权体系（已逆向 + 官方规范核实）
+## 2. 鉴权体系
 
 | 登录方式 | 协议 / 端点 | 本项目实现 |
 |---|---|---|
-| **微信扫码** | OAuth 2.1 + PKCE，`mcp.liblib.tv` 标准发现端点 | ✅ 忠实实现，自动发现端点 |
-| **手机号验证码** | `api.liblib.tv` passport 类端点（逆向基址） | ✅ 实现，端点可配置 + 浏览器核验 |
-| **OpenAPI（Access Key）** | `im.liblib.tv/openapi`，Bearer 鉴权 | ✅ 可选，REST 透传 |
-| **MCP（86 个工具）** | `mcp.liblib.tv/mcp`，JSON-RPC，Bearer 鉴权 | ✅ 接入层（自动化核心入口） |
+| **微信扫码** | OAuth 2.1 + PKCE，标准发现端点（自动发现） | ✅ 忠实实现 |
+| **手机号验证码** | 官方 passport 登录流程（端点已内置，可配置） | ✅ 实现，端点可经环境变量覆盖 |
+| **OpenAPI（Access Key）** | Access Key 鉴权，REST 透传 | ✅ 可选 |
+| **MCP（86 个工具）** | JSON-RPC + Bearer 鉴权（创作能力入口） | ✅ 接入层（自动化核心入口） |
 
 > 登录拿到的 token 真正能驱动的是 **MCP 端点**（全部创作能力）。微信扫码走标准
 > OAuth 2.1 + PKCE，令牌约 1 小时过期，由 refresh token 自动续期，凭据存
@@ -68,20 +78,11 @@ python -m liblib2api.cli login phone --phone 13800138000
 python -m liblib2api.cli login phone --phone 13800138000 --code 123456
 ```
 
-#### 手机号登录端点（已实测）
+#### 手机号登录端点
 
-liblib.tv 的手机号登录端点未在公开文档给出。本项目已实测确认以下端点可用
-（默认已写入 `config.py`，无需手动设置）：
-
-```text
-发验证码  POST https://passport.liblib.art/api/www/login/sendLoginPhoneCode
-登  录    POST https://passport.liblib.art/api/www/login/loginByPhoneCode
-用户信息  POST https://passport.liblib.art/api/www/user/getUserInfo
-```
-
-Web API（会员/积分/模型）基址为 `https://api2.liblib.art`，调用需带请求头
-`Token: <access_token>` 与 `Webid: <webid>`。若未来端点变动，用环境变量
-`LIBLIB_PHONE_SMS_SEND_URL` / `LIBLIB_PHONE_LOGIN_URL` / `LIBLIB_WEB_API_BASE` 覆盖即可。
+手机号登录端点已内置在 `config.py` 中（基于官方 passport 登录流程），无需手动设置。
+若未来端点变动，可用环境变量 `LIBLIB_PHONE_SMS_SEND_URL` / `LIBLIB_PHONE_LOGIN_URL`
+覆盖；Web API 基址可用 `LIBLIB_WEB_API_BASE` 覆盖。
 
 ---
 
@@ -225,13 +226,13 @@ curl -X POST "http://127.0.0.1:8000/mcp/tools/call" \
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `LIBTV_HOME` | `~/.libtv` | 凭据目录 |
-| `LIBTV_ISSUER` | `https://mcp.liblib.tv` | OAuth issuer（用于发现端点） |
-| `LIBTV_MCP_URL` | `https://mcp.liblib.tv/mcp` | MCP 网关 |
+| `LIBTV_ISSUER` | （内置，可经环境变量覆盖） | OAuth issuer（用于发现端点） |
+| `LIBTV_MCP_URL` | （内置） | MCP 网关 |
 | `LIBTV_OAUTH_PORT` | `8765` | CLI 阻塞模式本地回调端口 |
 | `LIBTV_OAUTH_CLIENT_ID` | 空（尝试动态注册） | OAuth client_id |
-| `LIBLIB_PHONE_API_BASE` | `https://passport.liblib.art` | 手机号登录基址（已实测可用） |
-| `LIBLIB_PHONE_SMS_SEND_URL` / `LIBLIB_PHONE_LOGIN_URL` | `passport.liblib.art/api/www/login/...` | 手机号端点（已实测） |
-| `LIBLIB_WEB_API_BASE` | `https://api2.liblib.art` | 会员/积分/模型列表接口基址 |
+| `LIBLIB_PHONE_API_BASE` | （内置） | 手机号登录基址 |
+| `LIBLIB_PHONE_SMS_SEND_URL` / `LIBLIB_PHONE_LOGIN_URL` | （内置） | 手机号登录端点，可覆盖 |
+| `LIBLIB_WEB_API_BASE` | （内置） | 会员/积分/模型列表接口基址 |
 | `LIBLIB_MONITOR_INTERVAL` | `600` | 账号活性巡检间隔（秒，默认 10 分钟） |
 | `LIBTV_ACCESS_KEY` | 空 | OpenAPI Access Key（可选） |
 | `LIBLIB_PROXY` | 空 | HTTP 代理 |
@@ -292,6 +293,6 @@ Liblib2API/
 ## 9. 路线图
 
 - [ ] 补充各 MCP 工具的高层封装（generate_video / export 等）与轮询助手
-- [ ] 多账号凭据管理
-- [ ] 抓包脚本 `liblib2api sniff` 一键提取真实手机号登录端点
-- [ ] 适配 LiblibAI 生图 Web API（`bridge.liblib.art`，参考 liblib-web）
+- [ ] 多账号凭据管理与生成历史记录
+- [ ] 生成任务的异步轮询 + webhook 回调
+- [ ] 面板内登录体验优化与生成历史展示
