@@ -37,6 +37,8 @@ import qrcode
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import liblib2api.config as cfg
 from liblib2api import auth as srv_auth
@@ -86,6 +88,47 @@ app = FastAPI(
     description="团队账号统一管理面板 + 图片/视频/音频生成开放接口（团队自用）",
     version="0.5.0",
 )
+
+# 跨域支持：独立前端（如 Vite 开发服务器 :5173）需要能跨端口调用本 API。
+# 可用 LIBLIB_CORS_ORIGINS 指定逗号分隔的白名单；留空则允许任意来源（自托管场景）。
+_CORS_ORIGINS = [
+    o.strip()
+    for o in (os.environ.get("LIBLIB_CORS_ORIGINS") or "").split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS or ["*"],
+    allow_credentials=bool(_CORS_ORIGINS),
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# 构建版前端（Vue SPA）托管
+# 后端在 8000 端口同时提供 API（/api/v1/*）与图形化界面。构建产物优先从
+# 仓库内嵌的 liblib2api/webui/dist 读取；也可通过 LIBLIB_WEBUI_DIST 指向
+# 同级的 front/dist（开发场景），或任意自定义目录。
+# ---------------------------------------------------------------------------
+def _find_webui_dist() -> Optional[Path]:
+    env = os.environ.get("LIBLIB_WEBUI_DIST")
+    candidates: list[Path] = []
+    if env:
+        candidates.append(Path(env))
+    candidates.append(Path(__file__).parent / "webui" / "dist")
+    candidates.append(Path(__file__).parent.parent.parent / "front" / "dist")
+    candidates.append(Path("/workspace/front/dist"))
+    for c in candidates:
+        try:
+            if c.is_dir() and (c / "index.html").exists():
+                return c
+        except OSError:  # noqa: BLE001
+            continue
+    return None
+
+
+_WEBUI_DIST = _find_webui_dist()
 
 _store = AccountStore()
 _teams = TeamStore()
@@ -192,6 +235,9 @@ _PUBLIC_PATHS = {
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):  # noqa: ANN001
     path = request.url.path
+    # 预检请求（CORS）直接放行，避免被鉴权中间件拦截
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if path in _PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/openapi.json") or path == "/redoc":
         return await call_next(request)
     # 登录接口无需鉴权
@@ -199,6 +245,9 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001
         return await call_next(request)
     # 使用条例：首次进入面板时需在登录前阅读，故不强制鉴权
     if path in ("/api/v1/terms", "/api/v1/terms/accept"):
+        return await call_next(request)
+    # 微信 OAuth 回调：由用户浏览器携带授权码访问，不携带管理员令牌，故免鉴权
+    if path == "/api/v1/auth/wechat/callback":
         return await call_next(request)
     if path.startswith("/api/v1/"):
         if not _check_request_auth(request):
@@ -1210,8 +1259,8 @@ def phone_send_code(payload: dict = Body(...)):
     from liblib2api.auth.phone import PhoneLogin
 
     try:
-        with PhoneLogin(proxy=proxy) as p:
-            res = p.send_code(phone)
+        p = PhoneLogin(proxy=proxy)
+        res = p.send_code(phone)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"发送验证码失败：{e}")
     return {"phone": phone, "result": res}
@@ -1228,9 +1277,9 @@ def phone_login(payload: dict = Body(...)):
     from liblib2api.auth.phone import PhoneLogin
 
     try:
-        with PhoneLogin(proxy=proxy) as p:
-            creds = p.login(phone, code)
-            info = p.user_info()
+        p = PhoneLogin(proxy=proxy)
+        creds = p.login(phone, code)
+        info = p.user_info()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"登录失败：{e}")
 
@@ -1255,29 +1304,37 @@ def phone_login(payload: dict = Body(...)):
 
 @app.get("/api/v1/auth/wechat/authorize")
 def wechat_authorize(open_browser: bool = Query(False)):
+    """生成微信扫码授权链接 + state。
+
+    回调地址指向本面板的 /api/v1/auth/wechat/callback（而非 CLI 默认端口），
+    这样用户扫码授权后，授权码会被本面板接收并完成登录。
+    """
     from liblib2api.auth.wechat import WechatLoginFlow
 
-    flow = WechatLoginFlow()
-    state, url = flow.begin(open_browser=open_browser)
-    _PENDING_WECHAT[state] = {"flow": flow, "url": url}
+    redirect_uri = f"{cfg.SERVER_PUBLIC_URL.rstrip('/')}/api/v1/auth/wechat/callback"
+    try:
+        flow = WechatLoginFlow(redirect_uri=redirect_uri)
+        state, url = flow.begin(open_browser=open_browser)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"获取微信授权链接失败：{e}")
+    _PENDING_WECHAT[state] = {"flow": flow, "url": url, "done": False, "error": None, "account": None}
     return {"state": state, "authorize_url": url}
 
 
-@app.get("/api/v1/auth/wechat/poll")
-def wechat_poll(state: str = Query(...)):
-    flow = _PENDING_WECHAT.get(state)
-    if not flow:
-        raise HTTPException(404, "state 不存在或已过期")
-    result = flow.poll()
-    if result.get("status") == "pending":
-        return {"status": "pending"}
-    if result.get("status") == "error":
-        raise HTTPException(400, result.get("message", "扫码失败"))
-    creds = result.get("credentials")
-    if not creds:
-        raise HTTPException(400, "未获取到凭据")
+@app.get("/api/v1/auth/wechat/callback")
+def wechat_callback(code: str = Query(...), state: str = Query(...)):
+    """微信 OAuth 回调：携带授权码回来，换取凭据并登记账号。"""
+    item = _PENDING_WECHAT.get(state)
+    if not item:
+        return HTMLResponse("<h3>授权失败：state 不存在或已过期，请重新在面板发起扫码。</h3>", status_code=400)
+    flow = item["flow"]
+    try:
+        creds = flow.finish(code, state)
+    except Exception as e:  # noqa: BLE001
+        item["error"] = str(e)
+        return HTMLResponse(f"<h3>授权处理失败：{e}</h3>", status_code=400)
     acc = Account(
-        account=result.get("account") or creds.account or "wechat",
+        account=creds.account or "wechat",
         access_token=creds.access_token,
         login_method="wechat",
         webid=creds.extra.get("webid"),
@@ -1289,8 +1346,22 @@ def wechat_poll(state: str = Query(...)):
         _sync_account(acc)
     except (ApiError, AuthError) as e:
         log.warning("微信登录后同步失败：%s", e)
-    _PENDING_WECHAT.pop(state, None)
-    return {"status": "ok", "account": _account_view(acc)}
+    item["done"] = True
+    item["account"] = _account_view(acc)
+    return HTMLResponse("<h3>✅ LibTV 微信授权成功！可关闭此页面返回面板。</h3>")
+
+
+@app.get("/api/v1/auth/wechat/poll")
+def wechat_poll(state: str = Query(...)):
+    """轮询扫码结果：pending / ok / error。"""
+    item = _PENDING_WECHAT.get(state)
+    if not item:
+        raise HTTPException(404, "state 不存在或已过期，请重新获取授权链接")
+    if item.get("error"):
+        raise HTTPException(400, item["error"])
+    if item.get("done"):
+        return {"status": "ok", "account": item.get("account")}
+    return {"status": "pending"}
 
 
 @app.get("/api/v1/auth/wechat/qr")
@@ -2076,7 +2147,23 @@ def panel():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    # 优先返回构建版前端（Vue SPA）；未构建时退回旧的面板页。
+    if _WEBUI_DIST is not None:
+        try:
+            return HTMLResponse((_WEBUI_DIST / "index.html").read_text(encoding="utf-8"))
+        except OSError:  # noqa: BLE001
+            pass
     return HTMLResponse(
         '<meta charset="utf-8"><meta http-equiv="refresh" content="0; url=/panel">'
         "<p>跳转到 <a href='/panel'>/panel</a></p>"
     )
+
+
+if _WEBUI_DIST is not None:
+    _WEBUI_ASSETS = _WEBUI_DIST / "assets"
+    if _WEBUI_ASSETS.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(_WEBUI_ASSETS), html=False),
+            name="webui_assets",
+        )
