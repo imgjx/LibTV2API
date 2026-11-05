@@ -7,7 +7,7 @@
 2. 对外 API（/api/v1/*）给自动化工作流用：图片/视频/音频生成走账号池交叉选择，
    积分、账号类型、模型可用性动态拉取。视频支持多格式输出与「多账号接力拆分生成」。
 3. 每个账号可绑定独立代理 IP。
-4. 后台每 10 分钟巡检账号活性 + 自动签到（monitor）。
+4. 后台每 10 分钟巡检账号活性 + 自动领取权益（monitor）。
 5. 公网/团队共享部署时：面板需**单管理员用户名/密码**登录；对外 API 需携带 **API Key**
    （支持 Authorization: Bearer / X-Api-Key / ?api_key= 多种兼容形式）。
 
@@ -493,10 +493,22 @@ def _sync_account(acc: Account) -> dict:
                 free_power = None
     except AuthError as e:
         # 登录态过期：不是账号被限制，标记为待重新登录，便于一键换 token 恢复。
+        #
+        # 注意这里不能返回 401：前端的 api() 会把任何 401 当成「管理员会话失效」
+        # 并弹回登录页，于是「点一下同步账号」就会把管理员踢出面板，
+        # 看起来就像账号退登了——而实际只是该账号的 token 到期。
+        # 故改用 409 Conflict，并在 detail 中带 error 标记供前端精确识别。
         _store.update(acc.account, status="auth_expired", auth_expired=True,
                       alive=False, alive_error=str(e)[:200],
                       last_alive_check=int(time.time()))
-        raise HTTPException(401, f"登录态已过期，请重新登录：{e}")
+        raise HTTPException(
+            409,
+            detail={
+                "error": "account_auth_expired",
+                "account": acc.account,
+                "message": f"账号 {acc.account} 的登录态已过期，请重新登录后继续使用",
+            },
+        )
     except Exception as e:  # noqa: BLE001
         # 偶发故障不改变账号可用性判定，只记录原因，等下一轮再确认。
         _store.update(acc.account, alive_error=str(e)[:200],
@@ -1350,14 +1362,34 @@ def phone_login(payload: dict = Body(...)):
         raise HTTPException(400, "缺少 phone 或 code")
     from liblib2api.auth.phone import PhoneLogin
 
+    old = _store.get(str(phone))
+    # 复用该账号历史 webid（设备指纹）：重新登录时不应让平台侧看起来
+    # 像换了新设备，否则可能触发额外风控校验。
+    old_webid = old.webid if old else None
+
     try:
         with PhoneLogin(proxy=proxy) as p:
+            if old_webid:
+                p.adopt_webid(old_webid)
             creds = p.login(phone, code)
-            info = p.user_info()
+            # user_info() 现在会带上 Token 头，返回平台原始响应体。
+            # 它失败不应让整个登录失败——token 已经拿到了，用户信息
+            # 只是昵称/ID 之类的补充信息，取不到就用登录响应里的值。
+            info = {}
+            try:
+                raw = p.user_info() or {}
+                if isinstance(raw, dict):
+                    if raw.get("code") in (0, None) and isinstance(raw.get("data"), dict):
+                        info = raw["data"]
+                    elif raw.get("data") is None and raw.get("code") not in (0, None):
+                        info = {}  # 登录态校验未通过，但登录本身已成功
+                    else:
+                        info = raw.get("data") or {}
+            except Exception as e:  # noqa: BLE001
+                log.warning("登录后读取用户信息失败（不影响登录）：%s", e)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"登录失败：{e}")
 
-    old = _store.get(str(phone))
     extra = dict((old.extra if old else {}) or {})
     extra.update({
         "cookies": creds.extra.get("cookies") or {},
@@ -1368,10 +1400,14 @@ def phone_login(payload: dict = Body(...)):
         # 已有账号：原地换 token，保留团队归属、备注、额度、积分等本地数据。
         # 之前这里直接 _store.add() 整体替换，重新登录一次就会把
         # 成员额度绑定、备注、算力点等信息全部清空。
+        #
+        # 特别注意必须同时把 alive 置回 True：监控在判定登录态过期时会写
+        # alive=False，而账号选择器会据此把账号剔除。若只重置 status，
+        # 重新登录成功后账号仍因 alive=False 被排除，等于"登录了也没用"。
         _store.update(
             phone,
             access_token=creds.access_token,
-            webid=creds.extra.get("webid") or old.webid,
+            webid=creds.extra.get("webid") or old_webid,
             nickname=info.get("nickname") or creds.extra.get("nickname") or old.nickname,
             user_id=str(info.get("id")) if info.get("id") else old.user_id,
             uuid=info.get("uuid") or old.uuid,
@@ -1379,7 +1415,9 @@ def phone_login(payload: dict = Body(...)):
             extra=extra,
             status="active",
             auth_expired=False,
+            alive=True,
             alive_error=None,
+            last_alive_check=int(time.time()),
         )
         acc = _store.get(str(phone))
     else:
@@ -1387,7 +1425,7 @@ def phone_login(payload: dict = Body(...)):
             account=phone,
             access_token=creds.access_token,
             login_method="phone",
-            webid=creds.extra.get("webid"),
+            webid=creds.extra.get("webid") or old_webid,
             nickname=info.get("nickname") or creds.extra.get("nickname"),
             user_id=str(info.get("id")) if info.get("id") else None,
             uuid=info.get("uuid"),

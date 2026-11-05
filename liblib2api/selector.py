@@ -74,6 +74,17 @@ class AccountSelector:
             cands.append(a)
         return cands
 
+    def _expired_accounts(self) -> list[Account]:
+        """当前处于「登录态过期」的账号。
+
+        这些账号并未被平台注销，只是 token 到期，重新登录即可恢复。
+        单独列出用于给调用方更准确的提示（而不是笼统的「无可用账号」）。
+        """
+        return [
+            a for a in self.store.list()
+            if a.access_token and (a.auth_expired or a.status == "auth_expired")
+        ]
+
     def select(
         self,
         kind: Optional[str] = None,
@@ -93,6 +104,12 @@ class AccountSelector:
                 reason += f"（模型 {model_key} 在当前账号池中均不可用）"
             if require_points:
                 reason += f"（满足积分≥{require_points} 的账号不足）"
+            # 区分「账号被限制/下线」与「token 过期」：后者只需重新登录即可恢复，
+            # 提示语要说清楚，避免让人误以为账号被平台注销了。
+            expired = self._expired_accounts()
+            if expired:
+                names = "、".join(a.account for a in expired[:3])
+                reason += f"（账号 {names} 登录态已过期，请重新登录后恢复使用）"
             if self.team_store is not None:
                 blocked = [
                     self._quota_blocked(a)

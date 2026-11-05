@@ -67,6 +67,8 @@ class PhoneLogin(AuthMethod):
         self.user_info_url = user_info_url
         self.origin = origin
         self.token_target = token_target
+        self._token: Optional[str] = None
+        self._webid: Optional[str] = None
         self._client = httpx.Client(
             timeout=http_timeout,
             follow_redirects=True,
@@ -141,10 +143,36 @@ class PhoneLogin(AuthMethod):
         self._client.cookies.update(cookies)
         creds.extra["cookies"] = cookies
         creds.extra["cid"] = body.get("cid")
+        # 把 token / webid 写进客户端请求头。
+        #
+        # 关键修复：此前 user_info() 复用同一个客户端却从未注入 Token 头，
+        # 于是「登录成功后立刻校验登录态」必然返回「未登录」，
+        # 让人误以为登录失败 / 账号被踢，实际上 token 是好的。
+        # 平台（passport / api2）判定登录态看的就是 Token 头（+ Webid）。
+        self._token = creds.access_token
+        self._webid = creds.extra.get("webid")
+        self._client.headers["Token"] = creds.access_token
+        if self._webid:
+            self._client.headers["Webid"] = str(self._webid)
         return self._persist(creds)
+
+    def adopt_webid(self, webid: Optional[str]) -> None:
+        """复用该账号此前使用过的 webid（设备指纹）。
+
+        webid 是客户端生成的设备标识。同一账号每次登录都换新 webid 会让
+        平台侧看起来像换了一台新设备，可能触发风控或额外的会话校验。
+        因此重新登录时沿用历史 webid，除非平台在下发响应里给了新的。
+        """
+        if webid:
+            self._webid = webid
+            self._client.headers["Webid"] = str(webid)
 
     # ----- 用户信息（校验登录态）-----
     def user_info(self) -> dict:
+        """查询当前登录用户信息。
+
+        登录成功后本对象已注入 Token / Webid 头，可直接用于校验登录态。
+        """
         try:
             resp = self._client.post(self.user_info_url, json={})
             resp.raise_for_status()

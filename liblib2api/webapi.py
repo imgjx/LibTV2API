@@ -39,6 +39,59 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
 
+#: 平台在「未登录 / 登录态过期」时返回的固定消息。
+#: 只收录语义完整的短句，避免把含 "token" 的正常业务提示误判为登录态问题。
+_LOGIN_EXPIRED_MSGS = {
+    "no login",
+    "not login",
+    "not logged in",
+    "no login or expired",
+    "未登录",
+    "未登陆",
+    "登录已过期",
+    "登录已失效",
+    "登录状态已过期",
+    "登录态已过期",
+    "请先登录",
+    "需要登录",
+    "token已过期",
+    "token已失效",
+}
+
+
+def _is_login_expired(code: Any, msg: Any) -> bool:
+    """判断平台的错误响应是否代表「登录态过期（需重新登录）」。
+
+    判定依据：
+      1. ``code`` 为 401（平台对未登录一律返回 HTTP 200 + body code=401）；
+      2. ``msg`` 归一化后与内置短句完全一致。
+
+    刻意**不使用** "token" 之类的模糊关键词：像「token 数量超限」
+    「Token 参数错误」这类业务提示同样含该词，早前按关键词匹配会
+    把完全正常的账号判成退登并停用，是「账号莫名失效」的根因之一。
+    """
+    # 1) 明确的 401
+    try:
+        if int(code) == 401:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    # 2) 消息语义精确匹配
+    text = str(msg or "").strip().lower()
+    if not text:
+        return False
+    if text in _LOGIN_EXPIRED_MSGS:
+        return True
+    # 允许带前后缀的常见变体，但要求核心短语完整出现且消息本身较短。
+    # 长度上限很关键：「该账号未登录过此活动」这类句子同样含「未登录」，
+    # 若不限制长度就会把正常的业务提示误判成登录态过期。
+    if len(text) <= 20:
+        for phrase in ("未登录", "未登陆", "登录已过期", "登录已失效", "请先登录"):
+            if phrase in text:
+                return True
+    return False
+
 
 class WebApiClient:
     """针对单个账号的 Web API 客户端。每个账号可绑定独立代理。"""
@@ -115,11 +168,14 @@ class WebApiClient:
             # 平台对「token 过期 / 未登录」返回 HTTP 200 + body code=401。
             # 这属于登录态问题而非接口故障，必须单独归类，
             # 否则会被当成账号被限制，并触发「账号失效」误报。
-            code_num = int(code) if str(code).isdigit() else None
-            if code_num == 401 or any(
-                kw in str(msg).lower() for kw in ("未登录", "no login", "not login", "登录已过期", "token")
-            ):
-                raise AuthError(f"登录态已过期，请重新登录（{msg}）")
+            #
+            # 判定必须精确：早前把 "token" 当作关键词，只要消息里出现 token
+            # 就归为登录态过期，而「token 数量超限」「Token 参数错误」之类的
+            # 业务提示同样含 token，会把好账号误判为退登。
+            # 现在只认「明确的未登录语义」：401 码，或短消息整体表达未登录。
+            if _is_login_expired(code, msg):
+                # 只保留平台原始原因，避免与上层「登录态已过期，请重新登录」重复。
+                raise AuthError(str(msg) or "未登录")
             raise ApiError(f"接口返回错误 [{code}]：{msg}")
         return payload.get("data") if isinstance(payload, dict) else payload
 

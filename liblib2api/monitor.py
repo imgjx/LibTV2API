@@ -118,13 +118,16 @@ class AccountMonitor:
             except AuthError as e:
                 # 登录态过期（平台拒绝当前 token）：账号本身未必有问题，
                 # 重新获取 token 后即可继续用，故标记为 auth_expired 而非账号异常。
+                # 平台原始消息往往只有「未登录」三个字，这里补成可读说明，
+                # 免得面板上看起来像账号被平台注销了。
+                reason = f"登录态已过期（{e}），请重新登录以恢复使用"
                 self.store.update(
                     acc.account, alive=False, auth_expired=True,
-                    alive_error=str(e)[:200],
+                    alive_error=reason[:200],
                     last_alive_check=int(time.time()), status="auth_expired",
                 )
                 res.ok = False
-                res.error = str(e)
+                res.error = reason
                 return res
             except ApiError as e:
                 # 接口/网络类故障属于偶发问题，不能据此判定账号不可用，

@@ -303,7 +303,7 @@ pre code,code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px
   <!-- 监控 -->
   <section id="tab-monitor" class="hidden">
     <div class="card">
-      <h2>账号活性监控（每 10 分钟巡检 + 自动签到）</h2>
+      <h2>账号活性监控（每 10 分钟巡检 + 自动领取权益）</h2>
       <div class="row">
         <button class="primary" onclick="monitorCheck()">立即巡检一次</button>
         <button class="ghost" onclick="monitorStatus()">查看监控状态</button>
@@ -336,7 +336,7 @@ pre code,code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px
   <section id="tab-notify" class="hidden">
     <div class="card">
       <h2>通知通道</h2>
-      <p class="small muted">团队运营需要主动找人：会员到期、账号失效、额度超限与每日领取结果，都可以通过这里推送出去。</p>
+      <p class="small muted">团队运营需要主动找人：会员到期、登录态过期、额度超限与每日权益领取结果，都可以通过这里推送出去。</p>
       <div id="notifyChannels" class="row" style="margin-top:10px"></div>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="testNotify()">发送测试通知</button>
@@ -447,8 +447,14 @@ function showLogin(){document.getElementById('loginOverlay').style.display='flex
 function logout(){localStorage.removeItem('liblib_token');document.getElementById('who').textContent='';showLogin();}
 async function api(path,opt={}){const h={'Content-Type':'application/json'};const t=_token();if(t)h['Authorization']='Bearer '+t;
   const r=await fetch(API+path,Object.assign({headers:h},opt));let j=null;try{j=await r.json();}catch(e){}
+  // 只有「管理员会话失效」才跳登录页。
+  // 之前把所有 401 都当成会话失效：账号 token 到期时后端也会返回 401，
+  // 于是点一下「同步账号」就被踢出面板，看起来就像账号退登了。
+  // 现在账号级登录态过期用 409 + error=account_auth_expired 表达，只提示不登出。
   if(r.status===401){showLogin();throw new Error('unauthorized');}
-  if(!r.ok){toast((j&&(j.detail||j.error))||('HTTP '+r.status),false);throw new Error('api err');}return j;}
+  if(!r.ok){const d=j&&j.detail;
+    const msg=(d&&(typeof d==='object'?(d.message||d.error||JSON.stringify(d)):d))||(j&&j.error)||('HTTP '+r.status);
+    toast(msg,false);throw new Error('api err');}return j;}
 async function adminLogin(){const u=document.getElementById('lg_user').value,p=document.getElementById('lg_pass').value;
   document.getElementById('lgErr').textContent='';
   try{const r=await fetch(API+'/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
@@ -798,7 +804,7 @@ async function loadNotify(){const j=await api('/notify/status');
   document.getElementById('nt_wecom_url').value=wc.webhook_url||'';
   document.getElementById('nt_wecom_men').value=(wc.mentioned||[]).join(',');
   // 规则
-  const rules=j.rules||{};const RULES=[['member_expiring','会员即将到期提醒'],['member_expired','会员已到期'],['account_invalid','账号失效'],['points_low','算力点余额偏低'],['quota_near_limit','成员额度接近上限'],['quota_exhausted','成员额度已用尽'],['claim_failed','权益领取失败'],['daily_digest','每日领取摘要']];
+  const rules=j.rules||{};const RULES=[['member_expiring','会员即将到期提醒'],['member_expired','会员已到期'],['account_invalid','登录态过期'],['points_low','算力点余额偏低'],['quota_near_limit','成员额度接近上限'],['quota_exhausted','成员额度已用尽'],['claim_failed','权益领取失败'],['daily_digest','每日权益领取摘要']];
   let h='<table><thead><tr><th>告警项</th><th>启用</th><th>阈值</th></tr></thead><tbody>';
   for(const [k,label] of RULES){
     const r=rules[k]||{};
