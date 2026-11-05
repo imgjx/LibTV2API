@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from liblib2api.accounts import Account, AccountStore
+from liblib2api.accounts import AccountStore
 from liblib2api.expiry import expiry_info
 from liblib2api.teams import TeamStore
 

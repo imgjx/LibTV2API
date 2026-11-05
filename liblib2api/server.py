@@ -12,12 +12,11 @@
 """
 from __future__ import annotations
 
-import time
 from typing import Any, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 import liblib2api.config as cfg
 from liblib2api.auth.phone import PhoneLogin

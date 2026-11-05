@@ -21,7 +21,6 @@
 """
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Optional
 
@@ -30,7 +29,6 @@ import httpx
 import liblib2api.config as cfg
 from liblib2api.exceptions import ApiError, AuthError
 from liblib2api.models import (
-    annotate_availability,
     build_usability_map,
     normalize_image,
     normalize_video,

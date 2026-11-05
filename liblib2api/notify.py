@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import json
 import smtplib
 import ssl
 import threading
@@ -24,12 +23,9 @@ import uuid
 from dataclasses import dataclass, field
 from email.header import Header
 from email.mime.text import MIMEText
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 import httpx
-
-import liblib2api.config as cfg
 
 # 事件类型
 EVENT_MEMBER_EXPIRING = "member_expiring"      # 会员即将到期
@@ -192,7 +188,6 @@ class WeComWebhookChannel:
     def send(self, msg: NotifyMessage) -> tuple[bool, str]:
         if not self.configured:
             return False, "企业微信通道未配置（Webhook 地址为空）"
-        level_map = {"info": "info", "warning": "warning", "critical": "error"}
         lines = [f"**{msg.title}**", msg.body or ""]
         if msg.links:
             lines.append("相关链接：")

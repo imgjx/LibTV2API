@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from liblib2api.accounts import AccountStore
@@ -59,6 +59,7 @@ class AccountMonitor:
         self.last_run_at: Optional[int] = None
         self.last_results: list[CheckResult] = []
         self.running = False
+        self._run_immediately = True
 
     @staticmethod
     def _default_client(acc) -> WebApiClient:
@@ -71,66 +72,69 @@ class AccountMonitor:
         except Exception as e:  # noqa: BLE001
             return CheckResult(account=acc.account, ok=False, error=f"构建客户端失败：{e}")
 
-        res = CheckResult(account=acc.account, ok=True)
-        try:
-            info = client.user_info()
-            atype = client.detect_account_type()
-            fp = client.free_power()
-            member = atype.get("raw_member") or {}
-            res.account_type = atype.get("type")
-            res.points = acc.points
-            res.free_power = fp.get("freePower")
-
-            # 刷新账号画像
-            self.store.update(
-                acc.account,
-                alive=True,
-                alive_error=None,
-                last_alive_check=int(time.time()),
-                account_type=atype.get("type"),
-                is_sub=atype.get("is_sub", acc.is_sub),
-                owner_uuid=atype.get("owner_uuid"),
-                owner_type=atype.get("owner_type"),
-                member_name=atype.get("name"),
-                account_level=atype.get("level"),
-                member_until=atype.get("member_until"),
-                package_type=atype.get("package_type"),
-                nickname=info.get("nickname") or acc.nickname,
-                user_id=str(info.get("id")) if info.get("id") else acc.user_id,
-                uuid=info.get("uuid") or acc.uuid,
-                free_power=fp.get("freePower") if fp.get("freePower") is not None else acc.free_power,
-                has_get_power=member.get("hasGetPower")
-                if member.get("hasGetPower") is not None
-                else acc.has_get_power,
-                status="active" if acc.status == "error" else acc.status,
-            )
-        except (ApiError, AuthError) as e:
-            self.store.update(
-                acc.account, alive=False, alive_error=str(e)[:200],
-                last_alive_check=int(time.time()), status="error",
-            )
-            res.ok = False
-            res.error = str(e)
-            return res
-        except Exception as e:  # noqa: BLE001
-            self.store.update(
-                acc.account, alive=False, alive_error=str(e)[:200],
-                last_alive_check=int(time.time()),
-            )
-            res.ok = False
-            res.error = str(e)
-            return res
-
-        # 每日权益：当日未领取则触发（发放免费算力）
-        if self.auto_claim and acc.last_claim != today:
+        # WebApiClient 持有 httpx 连接池，必须用 with 及时释放，
+        # 否则每轮巡检都会泄漏一个客户端（长期运行会耗尽连接/文件描述符）。
+        with client:
+            res = CheckResult(account=acc.account, ok=True)
             try:
-                ok = client.daily_claim()
-                res.checked_in = bool(ok)
-                if ok:
-                    self.store.update(acc.account, last_claim=today)
-            except Exception:  # noqa: BLE001
-                res.checked_in = False
-        return res
+                info = client.user_info()
+                atype = client.detect_account_type()
+                fp = client.free_power()
+                member = atype.get("raw_member") or {}
+                res.account_type = atype.get("type")
+                res.points = acc.points
+                res.free_power = fp.get("freePower")
+
+                # 刷新账号画像
+                self.store.update(
+                    acc.account,
+                    alive=True,
+                    alive_error=None,
+                    last_alive_check=int(time.time()),
+                    account_type=atype.get("type"),
+                    is_sub=atype.get("is_sub", acc.is_sub),
+                    owner_uuid=atype.get("owner_uuid"),
+                    owner_type=atype.get("owner_type"),
+                    member_name=atype.get("name"),
+                    account_level=atype.get("level"),
+                    member_until=atype.get("member_until"),
+                    package_type=atype.get("package_type"),
+                    nickname=info.get("nickname") or acc.nickname,
+                    user_id=str(info.get("id")) if info.get("id") else acc.user_id,
+                    uuid=info.get("uuid") or acc.uuid,
+                    free_power=fp.get("freePower") if fp.get("freePower") is not None else acc.free_power,
+                    has_get_power=member.get("hasGetPower")
+                    if member.get("hasGetPower") is not None
+                    else acc.has_get_power,
+                    status="active" if acc.status == "error" else acc.status,
+                )
+            except (ApiError, AuthError) as e:
+                self.store.update(
+                    acc.account, alive=False, alive_error=str(e)[:200],
+                    last_alive_check=int(time.time()), status="error",
+                )
+                res.ok = False
+                res.error = str(e)
+                return res
+            except Exception as e:  # noqa: BLE001
+                self.store.update(
+                    acc.account, alive=False, alive_error=str(e)[:200],
+                    last_alive_check=int(time.time()),
+                )
+                res.ok = False
+                res.error = str(e)
+                return res
+
+            # 每日权益：当日未领取则触发（发放免费算力）
+            if self.auto_claim and acc.last_claim != today:
+                try:
+                    ok = client.daily_claim()
+                    res.checked_in = bool(ok)
+                    if ok:
+                        self.store.update(acc.account, last_claim=today)
+                except Exception:  # noqa: BLE001
+                    res.checked_in = False
+            return res
 
     def check_all(self) -> list[CheckResult]:
         results: list[CheckResult] = []
@@ -147,13 +151,18 @@ class AccountMonitor:
 
     def _loop(self) -> None:
         self.running = True
+        first = True
         while not self._stop:
-            try:
-                self.check_all()
-            except Exception:  # noqa: BLE001
-                pass
-            # 用带中断的 sleep，便于 stop 时快速退出
-            for _ in range(self.interval):
+            # 首轮是否立即巡检由 start(run_immediately) 决定；此前实现会在
+            # 循环里跑一次、又另起线程跑一次，导致启动时重复巡检（重复领取权益）。
+            if not first or self._run_immediately:
+                try:
+                    self.check_all()
+                except Exception:  # noqa: BLE001
+                    pass
+            first = False
+            # 用带中断的 sleep，便于 stop 时快速退出；interval 下限 1 秒避免忙循环
+            for _ in range(max(1, int(self.interval))):
                 if self._stop:
                     break
                 time.sleep(1)
@@ -163,11 +172,9 @@ class AccountMonitor:
         if self._thread and self._thread.is_alive():
             return
         self._stop = False
+        self._run_immediately = run_immediately
         self._thread = threading.Thread(target=self._loop, daemon=True, name="account-monitor")
         self._thread.start()
-        if run_immediately:
-            # 立即跑一轮（不阻塞启动），后台线程内执行
-            threading.Thread(target=self.check_all, daemon=True).start()
 
     def stop(self) -> None:
         self._stop = True

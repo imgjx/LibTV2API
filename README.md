@@ -125,29 +125,12 @@ res = client.call_tool("generate_video", {...})   # 调用任意工具
 ```bash
 # 多账号团队面板（账号池 + 监控 + 模型可用性 + 图片/视频生成 API），默认入口
 python -m liblib2api.cli serve --port 8000
-# 浏览器打开 http://127.0.0.1:8000/panel 即可管理
+# 浏览器打开 http://127.0.0.1:8000/ 即可管理（/panel 为同一页面的兼容路径）
 ```
 
-> `serve` 默认启动 `liblib2api.panel_server:app`（多账号版）。若只需单账号 MCP 透传，
-> 可改用 `uvicorn liblib2api.server:app --port 8000`。
-
-### 独立 Vue 前端（front/）
-
-面板同时提供一套独立的 Vue 3 + Vite 前端（`front/`，与本项目同级目录），功能与 `/panel` 单页一致，
-便于二次开发与独立部署。前端通过 Vite 开发代理或后端已开启的 CORS 调用 `panel_server` 的 `/api/v1` 接口。
-
-```bash
-# 1) 先启动后端面板服务（端口 8000）
-python -m liblib2api.cli serve --port 8000
-
-# 2) 另开终端启动前端（端口 5173，开发代理转发 /api 到 8000）
-cd front
-npm install
-npm run dev          # 浏览器打开 http://localhost:5173
-
-# 生产构建（如需独立部署，设置 VITE_API_BASE 指向后端后重新 build）
-npm run build        # 产物在 front/dist
-```
+> `serve` 默认启动 `liblib2api.panel_server:app`（多账号版）。面板为随程序自带的
+> 零依赖单 HTML 页面（`liblib2api/panel.html`），无需单独构建前端。若只需单账号
+> MCP 透传，可改用 `uvicorn liblib2api.server:app --port 8000`。
 
 ### 一键启动脚本
 

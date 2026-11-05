@@ -327,28 +327,30 @@ class AccountStore:
         for item in items or []:
             try:
                 acc = Account.from_dict(item)
+                if not acc.account or not acc.access_token:
+                    skipped += 1
+                    continue
+                key = self._key(acc)
+                with self._lock:
+                    if key in self._accounts:
+                        if not overwrite:
+                            skipped += 1
+                            continue
+                        # 保留原有的代理与备注（导入不覆盖本机配置）
+                        old = self._accounts[key]
+                        acc.proxy = acc.proxy or old.proxy
+                        acc.note = acc.note or old.note
+                        acc.created_at = old.created_at
+                        # last_checkin 是只读属性（等价于 last_claim），必须写实际字段，
+                        # 否则覆盖导入会抛 AttributeError 并中断整个导入。
+                        acc.last_claim = old.last_claim
+                        self._accounts[key] = acc
+                        updated += 1
+                    else:
+                        self._accounts[key] = acc
+                        imported += 1
             except Exception:
                 skipped += 1
                 continue
-            if not acc.account or not acc.access_token:
-                skipped += 1
-                continue
-            key = self._key(acc)
-            with self._lock:
-                if key in self._accounts:
-                    if not overwrite:
-                        skipped += 1
-                        continue
-                    # 保留原有的代理与备注（导入不覆盖本机配置）
-                    old = self._accounts[key]
-                    acc.proxy = acc.proxy or old.proxy
-                    acc.note = acc.note or old.note
-                    acc.created_at = old.created_at
-                    acc.last_checkin = old.last_checkin
-                    self._accounts[key] = acc
-                    updated += 1
-                else:
-                    self._accounts[key] = acc
-                    imported += 1
         self.save()
         return {"imported": imported, "skipped": skipped, "updated": updated}

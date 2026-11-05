@@ -2,8 +2,8 @@
 
 设计原则
 --------
-1. 面板（/panel）是零依赖单页应用（panel.html），浏览器打开即可管理账号、看积分、
-   看模型可用性、发起图片/视频/音频生成。
+1. 面板（/ 与 /panel）是零依赖单页应用（panel.html），浏览器打开即可管理账号、
+   看积分、看模型可用性、发起图片/视频/音频生成；无需额外前端构建。
 2. 对外 API（/api/v1/*）给自动化工作流用：图片/视频/音频生成走账号池交叉选择，
    积分、账号类型、模型可用性动态拉取。视频支持多格式输出与「多账号接力拆分生成」。
 3. 每个账号可绑定独立代理 IP。
@@ -36,9 +36,7 @@ from typing import Any, Optional
 import qrcode
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 import liblib2api.config as cfg
 from liblib2api import auth as srv_auth
@@ -71,6 +69,8 @@ from liblib2api.selector import AccountSelector
 from liblib2api.teams import TeamStore
 from liblib2api.split_gen import (
     OpenAICompatibleClient,
+    Segment,
+    SplitPlan,
     VideoSplitPlanner,
     assign_accounts,
     single_account_feasible,
@@ -89,7 +89,7 @@ app = FastAPI(
     version="0.5.0",
 )
 
-# 跨域支持：独立前端（如 Vite 开发服务器 :5173）需要能跨端口调用本 API。
+# 跨域支持：浏览器从其它端口/来源调用本 API 时需要。
 # 可用 LIBLIB_CORS_ORIGINS 指定逗号分隔的白名单；留空则允许任意来源（自托管场景）。
 _CORS_ORIGINS = [
     o.strip()
@@ -105,37 +105,27 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# 构建版前端（Vue SPA）托管
-# 后端在 8000 端口同时提供 API（/api/v1/*）与图形化界面。构建产物优先从
-# 仓库内嵌的 liblib2api/webui/dist 读取；也可通过 LIBLIB_WEBUI_DIST 指向
-# 同级的 front/dist（开发场景），或任意自定义目录。
-# ---------------------------------------------------------------------------
-def _find_webui_dist() -> Optional[Path]:
-    env = os.environ.get("LIBLIB_WEBUI_DIST")
-    candidates: list[Path] = []
-    if env:
-        candidates.append(Path(env))
-    candidates.append(Path(__file__).parent / "webui" / "dist")
-    candidates.append(Path(__file__).parent.parent.parent / "front" / "dist")
-    candidates.append(Path("/workspace/front/dist"))
-    for c in candidates:
-        try:
-            if c.is_dir() and (c / "index.html").exists():
-                return c
-        except OSError:  # noqa: BLE001
-            continue
-    return None
-
-
-_WEBUI_DIST = _find_webui_dist()
-
 _store = AccountStore()
 _teams = TeamStore()
 _selector = AccountSelector(_store, _teams)
 _monitor = AccountMonitor(_store, interval=int(os.environ.get("LIBLIB_MONITOR_INTERVAL", "600")))
 
 _PENDING_WECHAT: dict[str, dict] = {}
+
+
+def _cleanup_pending_wechat(max_age: int = 900) -> None:
+    """清理过期的扫码状态并释放其 HTTP 客户端，避免长期驻留泄漏连接。"""
+    now = time.time()
+    for state, item in list(_PENDING_WECHAT.items()):
+        if now - float(item.get("created_at") or 0) <= max_age:
+            continue
+        flow = item.get("flow")
+        if flow is not None:
+            try:
+                flow.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _PENDING_WECHAT.pop(state, None)
 
 # ---------------------------------------------------------------------------
 # 管理员 & API Key 运行时状态（由 lifespan 从 settings 载入）
@@ -291,10 +281,7 @@ def _find_tool(creds, kind: str) -> Optional[str]:
     for t in tools:
         if _tool_matches(t, kind):
             return t.get("name")
-    # 退一步：只含关键词即可
-    blob_all = " ".join(
-        ((t.get("name") or "") + " " + (t.get("description") or "")).lower() for t in tools
-    )
+    # 退一步：只按名称关键词匹配
     for t in tools:
         name = (t.get("name") or "").lower()
         if any(k in name for k in _KIND_KEYWORDS.get(kind, [])):
@@ -457,7 +444,8 @@ def _register_credential(creds, note: str = "") -> Account:
     _store.add(acc)
     try:
         _sync_account(acc)
-    except (ApiError, AuthError) as e:
+    except Exception as e:  # noqa: BLE001
+        # 同步失败不应影响「账号已登记」这个主结果（登录/导入流程同理）。
         log.warning("账号 %s 同步失败：%s", acc.account, e)
     return acc
 
@@ -469,24 +457,25 @@ def _sync_account(acc: Account) -> dict:
       - 调 member/account 识别 account_type（member/free）、是否副卡、到期时间
       - 调 每日权益 + 模型列表，计算每个模型对该账号是否可用，写入 model_usable
     """
+    free_power = None
     try:
         with _client_for(acc) as c:
             snap = c.compute_model_usability()
-    except (ApiError, AuthError) as e:
+            # free_power 必须在 with 内调用：WebApiClient.__exit__ 会关闭 httpx 客户端，
+            # 之前放在 with 外会必然抛异常被吞掉，导致每日免费算力永远刷新不了。
+            try:
+                free_power = c.free_power().get("freePower")
+            except Exception:  # noqa: BLE001
+                free_power = None
+    except Exception as e:  # noqa: BLE001
+        # 统一把网络/解析异常转成 502，避免未捕获异常变成 500。
         _store.update(acc.account, status="error", alive=False,
                       alive_error=str(e)[:200], last_alive_check=int(time.time()))
         raise HTTPException(502, f"同步失败：{e}")
 
     atype = snap.get("account_type") or {}
     usable = snap.get("usable") or {}
-    member = atype.get("raw_member") or {}
-
-    # 免费算力（每日额度），用于面板展示与拆分生成的预算估算
-    free_power = None
-    try:
-        fp = c.free_power()
-        free_power = fp.get("freePower")
-    except Exception:  # noqa: BLE001
+    if free_power is None:
         free_power = acc.free_power
 
     _store.update(
@@ -612,8 +601,10 @@ def sync_all():
         try:
             _sync_account(acc)
             results.append({"account": acc.account, "ok": True})
-        except HTTPException as e:
-            results.append({"account": acc.account, "ok": False, "error": e.detail})
+        except Exception as e:  # noqa: BLE001
+            # 单个账号同步失败不应中断整批；HTTPException 与其它异常都要兜住。
+            results.append({"account": acc.account, "ok": False,
+                            "error": getattr(e, "detail", None) or str(e)})
     return {"results": results}
 
 
@@ -654,8 +645,10 @@ def account_models(
     except (ApiError, AuthError) as e:
         raise HTTPException(502, f"获取模型失败：{e}")
 
-    atype = snap["account_type"]["type"]
-    benefits = set(snap.get("free_benefit_keys", []))
+    # 平台返回结构可能随接口调整变化，这里统一用 .get 兜底，避免 KeyError 变成 500。
+    atype = (snap.get("account_type") or {}).get("type")
+    benefits = set(snap.get("free_benefit_keys") or [])
+    models_by_kind = snap.get("models") or {}
     # 合并运行时学习缓存
     learned = acc.model_usable or {}
 
@@ -663,7 +656,7 @@ def account_models(
     for k in ("video", "image"):
         if kind not in ("all", k):
             continue
-        for m in snap["models"][k]:
+        for m in (models_by_kind.get(k) or []):
             key = m.get("model_key") or m.get("name")
             usable = m.get("usable")
             if key in learned:
@@ -686,7 +679,8 @@ def account_models(
 # 导入 / 导出
 # ---------------------------------------------------------------------------
 # 导出路由已前置到 "/api/v1/accounts/{account}" 之前注册，避免被通配路由遮蔽。
-def _export_accounts(path: Optional[str] = Query(None, description="可选：写入指定文件路径")):
+# 这是内部 helper，默认值用普通 None（Query 对象只应由路由函数持有）。
+def _export_accounts(path: Optional[str] = None):
     text = _store.export(path)
     if path:
         return {"exported_to": path, "count": len(_store)}
@@ -703,28 +697,50 @@ def import_accounts(payload: dict = Body(...)):
     支持 {"accounts": [...]}，或 {"path": "/path/to.json"}，或 {"raw": "<json 文本>"}。
     每个导入的账号都会触发一次同步以识别类型与模型可用性。
     """
-    if "path" in (payload or {}):
+    payload = payload or {}
+    # 解析出本次导入涉及的账号标识，避免对账号池里所有账号重复做网络同步。
+    imported_keys: set[str] = set()
+
+    def _collect(items) -> None:
+        for a in items or []:
+            if isinstance(a, dict) and a.get("account"):
+                imported_keys.add(str(a["account"]))
+
+    if "path" in payload:
         p = Path(payload["path"])
         if not p.exists():
             raise HTTPException(400, f"文件不存在：{p}")
+        try:
+            raw_obj = _json.loads(p.read_text(encoding="utf-8"))
+            _collect(raw_obj.get("accounts") if isinstance(raw_obj, dict) else raw_obj)
+        except Exception:  # noqa: BLE001
+            pass
         summary = _store.import_accounts(p, overwrite=bool(payload.get("overwrite")))
-    elif "raw" in (payload or {}):
-        summary = _store.import_accounts(payload["raw"], overwrite=bool(payload.get("overwrite")))
-    elif "accounts" in (payload or {}):
-        import json as _json
+    elif "raw" in payload:
+        raw_text = payload["raw"] if isinstance(payload["raw"], str) else _json.dumps(payload["raw"], ensure_ascii=False)
+        try:
+            raw_obj = _json.loads(raw_text)
+            _collect(raw_obj.get("accounts") if isinstance(raw_obj, dict) else raw_obj)
+        except Exception:  # noqa: BLE001
+            pass
+        summary = _store.import_accounts(raw_text, overwrite=bool(payload.get("overwrite")))
+    elif "accounts" in payload:
+        _collect(payload["accounts"])
         summary = _store.import_accounts(_json.dumps({"accounts": payload["accounts"]}),
                                          overwrite=bool(payload.get("overwrite")))
     else:
         raise HTTPException(400, "请提供 accounts 数组、raw 文本或 path 路径")
 
-    # 导入后逐个识别类型
+    # 仅对本次导入的账号做类型识别；单个账号同步失败不影响整体导入结果。
+    # 之前只捕获 ApiError/AuthError，而 _sync_account 抛的是 HTTPException，
+    # 会导致「账号已导入成功」却整个接口返回 502。
     for acc in _store.list():
-        if acc.account in [a.get("account") for a in (payload.get("accounts") or []) if isinstance(a, dict)] \
-                or payload.get("path") or payload.get("raw"):
-            try:
-                _sync_account(acc)
-            except (ApiError, AuthError):
-                pass
+        if acc.account not in imported_keys:
+            continue
+        try:
+            _sync_account(acc)
+        except Exception as e:  # noqa: BLE001
+            log.warning("导入账号 %s 同步失败：%s", acc.account, e)
     return {"summary": summary, "total": len(_store)}
 
 
@@ -762,9 +778,12 @@ def claim_daily_bonus(account: str):
     acc = _store.get(account)
     if not acc:
         raise HTTPException(404, "账号不存在")
-    with _client_for(acc) as c:
-        ok = c.daily_claim()
-        fp = c.free_power()
+    try:
+        with _client_for(acc) as c:
+            ok = c.daily_claim()
+            fp = c.free_power()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"权益领取失败：{e}")
     today = time.strftime("%Y-%m-%d")
     _store.update(
         account,
@@ -1104,13 +1123,25 @@ def api_scan_alerts(payload: dict = Body(default={})):
 # ---------------------------------------------------------------------------
 # 通知中心（邮件 / 企业微信机器人 / 控制台）
 # ---------------------------------------------------------------------------
+def _public_notify_config(cfgd: dict) -> dict:
+    """返回给面板的配置副本：隐藏 SMTP 密码明文，避免凭据经 API 回显。"""
+    try:
+        out = _json.loads(_json.dumps(cfgd, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        out = dict(cfgd or {})
+    em = out.get("email")
+    if isinstance(em, dict) and em.get("smtp_password"):
+        em["smtp_password"] = "******"
+    return out
+
+
 @app.get("/api/v1/notify/status")
 def notify_status():
     """通道状态、告警规则与最近发送记录。"""
     return {
         "channels": _notifier.channel_status(),
         "rules": _notifier.rules(),
-        "config": _notifier.config,
+        "config": _public_notify_config(_notifier.config),
         "history": _notifier.history_list(30),
     }
 
@@ -1120,17 +1151,19 @@ def notify_update_config(payload: dict = Body(...)):
     """保存通知通道配置（邮件 SMTP / 企业微信 Webhook / 控制台）。"""
     payload = payload or {}
     cfgd = _notifier.config
+    # 面板里密码框默认留空表示「不修改」；忽略 None 值，避免把已保存的
+    # SMTP 密码 / Webhook 地址清空。
     for ch in ("email", "wecom", "console"):
         if isinstance(payload.get(ch), dict):
             merged = dict(cfgd.get(ch) or {})
-            merged.update(payload[ch])
+            merged.update({k: v for k, v in payload[ch].items() if v is not None})
             cfgd[ch] = merged
     if isinstance(payload.get("quiet_hours"), dict):
         merged_q = dict(cfgd.get("quiet_hours") or {})
-        merged_q.update(payload["quiet_hours"])
+        merged_q.update({k: v for k, v in payload["quiet_hours"].items() if v is not None})
         cfgd["quiet_hours"] = merged_q
     _notifier.save_config(cfgd)
-    return {"ok": True, "config": cfgd}
+    return {"ok": True, "config": _public_notify_config(cfgd)}
 
 
 @app.post("/api/v1/notify/rule/{event}")
@@ -1259,8 +1292,8 @@ def phone_send_code(payload: dict = Body(...)):
     from liblib2api.auth.phone import PhoneLogin
 
     try:
-        p = PhoneLogin(proxy=proxy)
-        res = p.send_code(phone)
+        with PhoneLogin(proxy=proxy) as p:
+            res = p.send_code(phone)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"发送验证码失败：{e}")
     return {"phone": phone, "result": res}
@@ -1277,9 +1310,9 @@ def phone_login(payload: dict = Body(...)):
     from liblib2api.auth.phone import PhoneLogin
 
     try:
-        p = PhoneLogin(proxy=proxy)
-        creds = p.login(phone, code)
-        info = p.user_info()
+        with PhoneLogin(proxy=proxy) as p:
+            creds = p.login(phone, code)
+            info = p.user_info()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"登录失败：{e}")
 
@@ -1297,13 +1330,14 @@ def phone_login(payload: dict = Body(...)):
     _store.add(acc)
     try:
         _sync_account(acc)  # 登录后立即识别类型 + 模型可用性
-    except (ApiError, AuthError) as e:
+    except Exception as e:  # noqa: BLE001
+        # 账号已经登记成功，同步失败只记日志，不能让登录接口整体失败。
         log.warning("登录后同步失败：%s", e)
     return {"account": _account_view(acc)}
 
 
 @app.get("/api/v1/auth/wechat/authorize")
-def wechat_authorize(open_browser: bool = Query(False)):
+def wechat_authorize(request: Request, open_browser: bool = Query(False)):
     """生成微信扫码授权链接 + state。
 
     回调地址指向本面板的 /api/v1/auth/wechat/callback（而非 CLI 默认端口），
@@ -1311,13 +1345,21 @@ def wechat_authorize(open_browser: bool = Query(False)):
     """
     from liblib2api.auth.wechat import WechatLoginFlow
 
-    redirect_uri = f"{cfg.SERVER_PUBLIC_URL.rstrip('/')}/api/v1/auth/wechat/callback"
+    _cleanup_pending_wechat()
+    # 优先按当前请求的来源拼接回调，这样换端口或经域名/反代访问都能正确回调；
+    # 显式配置 LIBLIB_SERVER_PUBLIC_URL（或 CLI --public-url）时以配置为准。
+    public_url = (os.environ.get("LIBLIB_SERVER_PUBLIC_URL") or "").rstrip("/")
+    origin = public_url or str(request.base_url).rstrip("/")
+    redirect_uri = f"{origin}/api/v1/auth/wechat/callback"
     try:
         flow = WechatLoginFlow(redirect_uri=redirect_uri)
         state, url = flow.begin(open_browser=open_browser)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"获取微信授权链接失败：{e}")
-    _PENDING_WECHAT[state] = {"flow": flow, "url": url, "done": False, "error": None, "account": None}
+    _PENDING_WECHAT[state] = {
+        "flow": flow, "url": url, "done": False, "error": None,
+        "account": None, "created_at": time.time(),
+    }
     return {"state": state, "authorize_url": url}
 
 
@@ -1344,7 +1386,7 @@ def wechat_callback(code: str = Query(...), state: str = Query(...)):
     _store.add(acc)
     try:
         _sync_account(acc)
-    except (ApiError, AuthError) as e:
+    except Exception as e:  # noqa: BLE001
         log.warning("微信登录后同步失败：%s", e)
     item["done"] = True
     item["account"] = _account_view(acc)
@@ -1492,6 +1534,7 @@ def get_settings():
 
 @app.post("/api/v1/settings")
 def update_settings(payload: dict = Body(...)):
+    global _api_key  # global 声明置于函数顶部，避免分支内声明带来的作用域隐患
     s = _load_settings()
     for k in ("openai_base_url", "openai_api_key", "openai_model", "points_per_second", "monitor_interval"):
         if k in payload and payload[k] is not None:
@@ -1499,7 +1542,6 @@ def update_settings(payload: dict = Body(...)):
     # 显式重设对外 API Key（或清空后由下次启动重新生成）
     if "api_key" in payload and payload["api_key"]:
         s["api_key"] = payload["api_key"]
-        global _api_key
         _api_key = s["api_key"]
     if payload.get("regenerate_api_key"):
         s["api_key"] = srv_auth.new_api_key()
@@ -1548,6 +1590,11 @@ def _adapt_generate_payload(p: dict, kind: str) -> dict:
     """
     p = dict(p or {})
     out = dict(p)
+    # 对外统一用「format」，而内部请求对象字段名是「fmt」。
+    # 少了这层映射，调用方选的封装格式（webm/mov/gif/webp/wav…）会被静默丢弃，
+    # 导致「多格式输出」永远回落成默认格式。
+    if p.get("format") and not p.get("fmt"):
+        out["fmt"] = p["format"]
     prompt = _extract_prompt(p)
     if prompt is not None:
         out["prompt"] = prompt
@@ -1594,8 +1641,12 @@ def _scan_model_constraints(cfg_raw: Any) -> dict:
             for k, v in d.items():
                 walk(v, (pre + "." + str(k)).lower() if pre else str(k).lower())
         elif isinstance(d, list):
+            # list 里的标量仍展开，但必须把「原始列表」保留下来，
+            # 否则 durationList / supportedDuration 这类档位信息会被抹平成单个数字，
+            # allowed_durations 永远解析不出来。
             for i in d:
                 walk(i, pre)
+            flat[pre] = d
         else:
             flat[pre] = d
 
@@ -2002,24 +2053,32 @@ def generate_video_balance(payload: dict = Body(...)):
         strategy = "single"
         note = (
             f"账号 {single_acc['account']} 算力点可独立覆盖 {total} 秒，"
-            "无需均摊，直接由该账号生成"
+            "无需均摊，直接由该账号一次生成"
         )
+        # 单账号可行时不做任何分段：构造仅一段的计划，由该账号生成完整时长。
+        # 之前无论 single/balance 都会照常分段并逐段生成，与「均摊仅作兜底」相违背。
+        plan = SplitPlan(
+            total_duration=total,
+            segments=[Segment(seconds=total, prompt=prompt, account=single_acc["account"])],
+            source="single",
+            note=note,
+        )
+        plan_segments, assign_err = plan.segments, None
+        llm_client = None
     else:
         strategy = "balance"
         note = "没有账号能独立覆盖完整时长，启用算力均摊（分段接力生成）"
-
-    # 构建 OpenAI 兼容客户端（未配置则不走 LLM，回退均分）
-    llm_client = None
-    if settings.get("openai_api_key"):
-        llm_client = OpenAICompatibleClient(
-            base_url=settings.get("openai_base_url", cfg.OPENAI_COMPATIBLE_BASE_URL),
-            api_key=settings.get("openai_api_key"),
-            model=settings.get("openai_model", cfg.OPENAI_COMPATIBLE_MODEL),
-        )
-    planner = VideoSplitPlanner(llm_client)
-
-    plan = planner.plan(prompt, total, accts, pps, constraints=constraints)
-    plan_segments, assign_err = assign_accounts(plan, accts, pps)
+        # 构建 OpenAI 兼容客户端（未配置则不走 LLM，回退均分）
+        llm_client = None
+        if settings.get("openai_api_key"):
+            llm_client = OpenAICompatibleClient(
+                base_url=settings.get("openai_base_url", cfg.OPENAI_COMPATIBLE_BASE_URL),
+                api_key=settings.get("openai_api_key"),
+                model=settings.get("openai_model", cfg.OPENAI_COMPATIBLE_MODEL),
+            )
+        planner = VideoSplitPlanner(llm_client)
+        plan = planner.plan(prompt, total, accts, pps, constraints=constraints)
+        plan_segments, assign_err = assign_accounts(plan, accts, pps)
 
     if bool(payload.get("dry_run")):
         return {
@@ -2138,32 +2197,19 @@ def mcp_tools(account: Optional[str] = Query(None)):
 PANEL_HTML = Path(__file__).parent / "panel.html"
 
 
-@app.get("/panel", response_class=HTMLResponse)
-def panel():
+def _panel_html() -> str:
+    """读取零依赖单 HTML 面板；缺失时给出可诊断的提示页。"""
     if PANEL_HTML.exists():
         return PANEL_HTML.read_text(encoding="utf-8")
     return "<h1>LibTV-Team 面板</h1><p>panel.html 未找到</p>"
 
 
+@app.get("/panel", response_class=HTMLResponse)
+def panel():
+    return _panel_html()
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    # 优先返回构建版前端（Vue SPA）；未构建时退回旧的面板页。
-    if _WEBUI_DIST is not None:
-        try:
-            return HTMLResponse((_WEBUI_DIST / "index.html").read_text(encoding="utf-8"))
-        except OSError:  # noqa: BLE001
-            pass
-    return HTMLResponse(
-        '<meta charset="utf-8"><meta http-equiv="refresh" content="0; url=/panel">'
-        "<p>跳转到 <a href='/panel'>/panel</a></p>"
-    )
-
-
-if _WEBUI_DIST is not None:
-    _WEBUI_ASSETS = _WEBUI_DIST / "assets"
-    if _WEBUI_ASSETS.is_dir():
-        app.mount(
-            "/assets",
-            StaticFiles(directory=str(_WEBUI_ASSETS), html=False),
-            name="webui_assets",
-        )
+    # 单 HTML 面板：根路径直接返回面板，无需跳转、无需额外前端构建。
+    return _panel_html()

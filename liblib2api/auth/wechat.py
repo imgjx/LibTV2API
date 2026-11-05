@@ -17,14 +17,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 import threading
 import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Callable, Optional
+from typing import Optional
 
 import httpx
 
@@ -75,6 +74,17 @@ class WechatLoginFlow:
             self._client.proxies = proxy  # type: ignore[attr-defined]
         self._discovery: dict = {}
         self._pending: dict[str, dict] = {}  # state -> {verifier, done, creds, error}
+
+    # ----- 资源释放 -----
+    def close(self) -> None:
+        """释放底层 httpx 连接池（面板会在扫码状态过期/完成后调用）。"""
+        self._client.close()
+
+    def __enter__(self) -> "WechatLoginFlow":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     # ----- 端点发现 -----
     def discover(self) -> dict:

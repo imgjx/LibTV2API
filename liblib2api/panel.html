@@ -60,6 +60,8 @@ pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12
 .media-card video,.media-card img{max-width:100%;border-radius:6px;display:block}
 .media-card audio{width:100%}
 .overlay{position:fixed;inset:0;background:rgba(8,10,14,.94);display:flex;align-items:center;justify-content:center;z-index:100}
+/* .overlay 的 display:flex 会盖过靠前的 .hidden，必须显式覆盖，否则 hidden 类对遮罩无效 */
+.overlay.hidden{display:none}
 #termsOverlay{z-index:120}
 .login-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
 .login-card h1{margin:0 0 4px;font-size:20px;font-weight:600}
@@ -105,6 +107,7 @@ pre code,code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px
       <input type="checkbox" id="termsAgree" onchange="termsCheck()"> 我已阅读并同意上述使用条例与合规声明
     </label>
     <button class="primary" style="width:100%;margin-top:12px" id="termsBtn" onclick="acceptTerms()" disabled>同意并进入面板</button>
+    <button class="ghost hidden" style="width:100%;margin-top:8px" id="termsClose" onclick="closeTerms()">关闭（已同意，无需重复操作）</button>
   </div>
 </div>
 <!-- 管理员登录遮罩（单管理员，用户名/密码，支持改密） -->
@@ -421,10 +424,23 @@ pre code,code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px
 <footer style="text-align:center;color:var(--mut);font-size:12px;padding:18px 22px;border-top:1px solid var(--line)">
   合规声明与使用条例：本工具面向团队自用，用于统一管理团队成员各自合法拥有的 liblib 账号；遵守平台服务条款，不做逆向、破解、绕过平台限制、批量注册与账号买卖；凭据仅存本机，作者与维护者对不当使用或账号受限造成的后果不承担责任。
 </footer>
+<!-- 分配账号：下拉选择成员（替代此前要求手工输入成员编号的 prompt） -->
+<div id="pickOverlay" class="overlay hidden">
+  <div class="login-card">
+    <h1>分配账号</h1>
+    <p class="small muted" id="pickAcc"></p>
+    <label>选择成员（不选表示解除归属）</label>
+    <select id="pickSel" style="width:100%;margin-bottom:12px"></select>
+    <button class="primary" style="width:100%" onclick="confirmAssign()">确定</button>
+    <button class="ghost" style="width:100%;margin-top:8px" onclick="closePick()">取消</button>
+  </div>
+</div>
 <div class="toast hidden" id="toast"></div>
 <script>
 const API="/api/v1";
 let PG_TYPE="video";
+// api() 内部已统一提示错误；这里只避免未捕获的 Promise rejection 刷屏控制台。
+window.addEventListener('unhandledrejection',e=>{e.preventDefault();});
 function toast(m,ok=true){const t=document.getElementById('toast');t.textContent=m;t.className='toast';if(!ok)t.style.borderColor='var(--bad)';t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),3500);}
 function _token(){return localStorage.getItem('liblib_token')||'';}
 function showLogin(){document.getElementById('loginOverlay').style.display='flex';}
@@ -455,7 +471,7 @@ function tab(n){document.querySelectorAll('nav button').forEach(b=>b.classList.t
   document.querySelectorAll('main section').forEach(s=>s.classList.add('hidden'));
   document.getElementById('tab-'+n).classList.remove('hidden');
   if(n==='accounts'){loadAccounts();loadExpiry();}
-  if(n==='teams'){loadTeams();fillAccounts('m_account');}
+  if(n==='teams'){loadTeams();}
   if(n==='models')fillAccounts('m_account');
   if(n==='monitor')monitorStatus();
   if(n==='stats')loadStats();
@@ -466,24 +482,32 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.t
 async function loadHealth(){try{const h=await api('/accounts');document.getElementById('health').textContent='· 账号 '+h.accounts.length+' 个';}catch(e){}}
 
 async function loadAccounts(){const j=await api('/accounts');const tb=document.getElementById('accountsTable');
-  if(!j.accounts.length){tb.innerHTML='<p class="muted">暂无账号。点「手机号登录 / 微信扫码 / 导入」添加，登录后会自动识别类型。</p>';return;}
+  const list=j.accounts||[];
+  if(!list.length){tb.innerHTML='<p class="muted">暂无账号。点「手机号登录 / 微信扫码 / 导入」添加，登录后会自动识别类型。</p>';return;}
   let h='<table><thead><tr><th>账号</th><th>类型</th><th>团队 / 成员</th><th>备注</th><th>积分</th><th>免费算力</th><th>额度</th><th>会员到期</th><th>活性</th><th>可用模型</th><th>权益</th><th>代理</th><th>操作</th></tr></thead><tbody>';
-  for(const a of j.accounts){
+  for(const a of list){
     const label=a.account_type_label||(a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知');
     const tb_=label==='VIP'?'<span class="badge b-member">VIP</span>':label==='免费'?'<span class="badge b-free">免费</span>':'<span class="badge b-free">未知</span>';
     const alive=a.alive===true?'<span class="badge b-alive">在线</span>':a.alive===false?'<span class="badge b-dead">失效</span>':'<span class="badge b-free">未检</span>';
     const sub=a.is_sub?' <span class="badge b-sub">副卡</span>':'';
-    const team=a.team_name?(a.team_name+(a.member_display_name?' · '+a.member_display_name:'')):(a.member_display_name||'<span class="muted">未分配</span>');
+    const team=a.team_name?esc(a.team_name+(a.member_display_name?' · '+a.member_display_name:'')):(a.member_display_name?esc(a.member_display_name):'<span class="muted">未分配</span>');
     const q=a.quota?quotaCell(a.quota):'<span class="muted">—</span>';
     const ex=expiryCell(a);
-    h+=`<tr><td>${a.account}${sub}</td><td>${tb_}</td><td>${team}</td><td class="small">${a.remark?esc(a.remark):'<span class="muted">—</span>'}</td>
-    <td>${a.points??'-'}</td><td>${a.free_power??'-'}</td><td>${q}</td><td>${ex}</td><td>${alive}</td>
-    <td>${a.model_usable_count}/${a.model_total_count}</td><td class="small">${a.last_claim||'-'}</td><td>${a.proxy?esc(a.proxy.slice(0,18))+'…':'-'}</td>
-    <td><button class="danger" onclick="assignAccount('${a.account}')">分配</button> <button class="danger" onclick="editRemark('${a.account}')">备注</button> <button class="danger" onclick="setProxy('${a.account}')">代理</button> <button class="danger" onclick="syncOne('${a.account}')">同步</button> <button class="danger" onclick="del('${a.account}')">删</button></td></tr>`;
+    const k=aq(a.account);
+    h+=`<tr><td>${esc(a.account)}${sub}</td><td>${tb_}</td><td>${team}</td><td class="small">${a.remark?esc(a.remark):'<span class="muted">—</span>'}</td>
+    <td>${esc(a.points??'-')}</td><td>${esc(a.free_power??'-')}</td><td>${q}</td><td>${ex}</td><td>${alive}</td>
+    <td>${esc(a.model_usable_count??0)}/${esc(a.model_total_count??0)}</td><td class="small">${esc(a.last_claim||'-')}</td><td>${a.proxy?esc(a.proxy.slice(0,18))+'…':'-'}</td>
+    <td><button class="danger" onclick="assignAccount('${k}')">分配</button> <button class="danger" onclick="editRemark('${k}')">备注</button> <button class="danger" onclick="setProxy('${k}')">代理</button> <button class="danger" onclick="syncOne('${k}')">同步</button> <button class="danger" onclick="del('${k}')">删</button></td></tr>`;
   }
   h+='</tbody></table>';tb.innerHTML=h;}
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+// 用于内嵌 onclick="fn('...')" 的字符串：先做 JS 转义，再交给 esc 做 HTML 属性转义。
+// 单独用 esc 会把 ' 变成 &#39;，浏览器还原成 ' 后会提前闭合 JS 字符串。
+function jsq(s){return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\r/g,'\\r').replace(/\n/g,'\\n');}
+function aq(s){return esc(jsq(s));}
+// 媒体地址只允许 http(s) / data:image / 站内相对路径，避免把不可信字符串塞进 src。
+function safeUrl(u){const s=String(u==null?'':u);return /^(https?:\/\/|data:image\/|\/)/i.test(s)?esc(s):'';}
 
 function expiryCell(a){const lv=a.member_expiry_level||'unknown';
   const cls=lv==='critical'||lv==='expired'?'e-critical':lv==='warning'?'e-warning':lv==='ok'?'e-ok':'e-unknown';
@@ -496,7 +520,8 @@ function quotaCell(q){if(q.unlimited)return '<span class="muted">不限</span>';
   return `<div style="min-width:110px"><div class="small">${q.used??0} / ${q.limit} 点</div>
     <div class="quota-bar"><i class="${cls}" style="width:${pct}%"></i></div></div>`;}
 
-async function fillAccounts(sel){const j=await api('/accounts');const s=document.getElementById(sel);s.innerHTML=j.accounts.map(a=>`<option value="${a.account}">${a.account}（${a.account_type_label||a.account_type||'?'}${a.is_member?'·VIP':''}）</option>`).join('');}
+async function fillAccounts(sel){const j=await api('/accounts');const s=document.getElementById(sel);
+  s.innerHTML=(j.accounts||[]).map(a=>`<option value="${esc(a.account)}">${esc(a.account)}（${esc(a.account_type_label||a.account_type||'?')}${a.is_member?'·VIP':''}）</option>`).join('');}
 
 function showImport(){toggle('importBox');}
 function toggle(id){document.getElementById(id).classList.toggle('hidden');}
@@ -508,18 +533,25 @@ async function phoneLogin(){const phone=document.getElementById('p_phone').value
 let wxTimer=null;
 async function wechatAuth(){const j=await api('/auth/wechat/authorize?open_browser=false');
   let qrHtml='';
-  try{const qr=await api('/auth/wechat/qr?state='+j.state);qrHtml=`<div class="qr"><img src="${qr.qr_png}" alt="微信扫码登录"></div>`;}catch(e){qrHtml='';}
-  document.getElementById('wxbox').innerHTML=`${qrHtml}<p class="small muted">使用微信扫一扫登录（已自动轮询）；也可 <a href="${j.authorize_url}" target="_blank">点此打开授权链接</a></p>`;
+  try{const qr=await api('/auth/wechat/qr?state='+encodeURIComponent(j.state));
+    qrHtml=`<div class="qr"><img src="${safeUrl(qr.qr_png)}" alt="微信扫码登录"></div>`;}catch(e){qrHtml='';}
+  const link=safeUrl(j.authorize_url);
+  document.getElementById('wxbox').innerHTML=`${qrHtml}<p class="small muted">使用微信扫一扫登录（已自动轮询）${link?`；也可 <a href="${link}" target="_blank" rel="noopener">点此打开授权链接</a>`:''}</p>`;
   if(wxTimer)clearInterval(wxTimer);
   wxTimer=setInterval(()=>wechatPoll(j.state),3000);}
-async function wechatPoll(state){let j;try{j=await api('/auth/wechat/poll?state='+state);}catch(e){if(wxTimer){clearInterval(wxTimer);wxTimer=null;}toast('微信登录失败',false);return;}
+async function wechatPoll(state){let j;try{j=await api('/auth/wechat/poll?state='+encodeURIComponent(state));}catch(e){if(wxTimer){clearInterval(wxTimer);wxTimer=null;}return;}
   if(j.status==='pending')return;
   if(wxTimer){clearInterval(wxTimer);wxTimer=null;}
   if(j.status==='ok'){toast('微信登录成功');loadAccounts();return;}
   toast('微信登录失败',false);}
 async function importAccounts(){const t=document.getElementById('importText').value;
   await api('/accounts/import',{method:'POST',body:JSON.stringify({raw:t})});toast('导入完成，已自动识别类型');loadAccounts();fillAccounts('m_account');}
-async function exportAccounts(){const r=await fetch(API+'/accounts/export');const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='liblib-accounts.json';a.click();toast('已导出');}
+async function exportAccounts(){const t=_token();
+  // 导出接口受鉴权保护，必须携带管理员令牌，否则开启鉴权后会 401。
+  const r=await fetch(API+'/accounts/export',{headers:t?{'Authorization':'Bearer '+t}:{}});
+  if(!r.ok){toast('导出失败：HTTP '+r.status,false);return;}
+  const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='liblib-accounts.json';a.click();
+  setTimeout(()=>URL.revokeObjectURL(u),1000);toast('已导出');}
 async function syncAll(){await api('/accounts/sync-all',{method:'POST'});toast('已同步全部');loadAccounts();}
 async function syncOne(acc){await api('/accounts/'+encodeURIComponent(acc)+'/sync',{method:'POST'});toast('已同步 '+acc);loadAccounts();}
 async function claimAll(){const j=await api('/accounts/claim-all',{method:'POST'});toast('权益领取完成');}
@@ -533,43 +565,47 @@ async function loadExpiry(){let j;try{j=await api('/accounts/expiring?days=60');
   bell.innerHTML=n?`🔔 <b>${n}</b>`:'';
   if(!n){box.innerHTML='<p class="muted small">近期没有账号的会员即将到期。</p>';return;}
   let h='<table><thead><tr><th>账号</th><th>团队 / 成员</th><th>备注</th><th>会员到期</th><th>剩余</th><th>积分</th><th>操作</th></tr></thead><tbody>';
-  for(const it of j.items){
+  for(const it of (j.items||[])){
     const cls=it.level==='critical'||it.level==='expired'?'e-critical':it.level==='warning'?'e-warning':'e-ok';
     const left=it.days_left<0?`已过期 ${-it.days_left} 天`:`剩 ${it.days_left} 天`;
     h+=`<tr><td>${esc(it.account)}</td><td class="small">${esc(it.team_name||'-')}${it.member_display_name?' · '+esc(it.member_display_name):''}</td>
     <td class="small">${esc(it.remark||'-')}</td><td class="small">${esc(it.member_until_text||it.member_until||'-')}</td>
     <td><span class="expiry ${cls}">${left}</span></td><td>${it.points??'-'}</td>
-    <td><button class="danger" onclick="syncOne('${esc(it.account)}')">刷新</button></td></tr>`;
+    <td><button class="danger" onclick="syncOne('${aq(it.account)}')">刷新</button></td></tr>`;
   }
   box.innerHTML=h+'</tbody></table>';}
 
 // ---------- 团队与成员 ----------
 async function loadTeams(){const j=await api('/teams');const box=document.getElementById('teamsBox');
-  if(!j.teams.length){box.innerHTML='<p class="muted">还没有团队。先在上面新建一个团队，再往里加成员。</p>';return;}
+  const list=j.teams||[];
+  if(!list.length){box.innerHTML='<p class="muted">还没有团队。先在上面新建一个团队，再往里加成员。</p>';return;}
   let h='';
-  for(const t of j.teams){
-    h+=`<div class="team-card"><h3>${esc(t.name)}<span class="small muted">${t.member_count} 名成员 · ${t.account_count} 个账号</span>
-      <button class="danger" style="margin-left:auto" onclick="delTeam('${t.id}')">删除团队</button></h3>`;
+  for(const t of list){
+    const tid=esc(t.id), tkey=aq(t.id);
+    h+=`<div class="team-card"><h3>${esc(t.name)}<span class="small muted">${esc(t.member_count??0)} 名成员 · ${esc(t.account_count??0)} 个账号</span>
+      <button class="danger" style="margin-left:auto" onclick="delTeam('${tkey}')">删除团队</button></h3>`;
     if(t.note)h+=`<p class="small muted">${esc(t.note)}</p>`;
     h+=`<div class="row" style="margin:8px 0">
-      <div><label>成员姓名</label><input id="mem_name_${t.id}" placeholder="如：张三" style="width:130px"></div>
-      <div><label>每日额度(算力点,空=不限)</label><input id="mem_quota_${t.id}" type="number" placeholder="不限" style="width:130px"></div>
-      <div><label>备注</label><input id="mem_note_${t.id}" placeholder="如：主力视频产出" style="width:170px"></div>
-      <div><label>&nbsp;</label><button class="primary" onclick="addMember('${t.id}')">新增成员</button></div>
+      <div><label>成员姓名</label><input id="mem_name_${tid}" placeholder="如：张三" style="width:130px"></div>
+      <div><label>每日额度(算力点,空=不限)</label><input id="mem_quota_${tid}" type="number" placeholder="不限" style="width:130px"></div>
+      <div><label>备注</label><input id="mem_note_${tid}" placeholder="如：主力视频产出" style="width:170px"></div>
+      <div><label>&nbsp;</label><button class="primary" onclick="addMember('${tkey}')">新增成员</button></div>
     </div>`;
-    if(!t.members.length)h+='<p class="small muted">该团队暂无成员。</p>';
-    for(const m of t.members){
+    const members=t.members||[];
+    if(!members.length)h+='<p class="small muted">该团队暂无成员。</p>';
+    for(const m of members){
       const pct=m.quota_unlimited?0:Math.min(100,Math.round((m.quota_used||0)/(m.quota_limit||1)*100));
       const cls=pct>=100?'bad':pct>=80?'warn':'';
-      const qtxt=m.quota_unlimited?'不限额':`${m.quota_used||0} / ${m.quota_limit} 点`;
+      const qtxt=m.quota_unlimited?'不限额':`${esc(m.quota_used??0)} / ${esc(m.quota_limit)} 点`;
       const accs=(m.account_ids||[]).map(x=>esc(x)).join('、')||'<span class="muted">未绑定账号</span>';
+      const mkey=aq(m.id);
       h+=`<div class="member-row"><span class="nm">${esc(m.name)}</span>
         <span class="small muted">${esc(m.note||'')}</span>
         <span class="small">账号：${accs}</span>
         <span class="quota-bar"><i class="${cls}" style="width:${pct}%"></i></span>
         <span class="small">${qtxt}</span>
-        <button class="danger" onclick="editQuota('${m.id}',${m.quota_limit==null?'null':m.quota_limit},${m.quota_used||0})">额度</button>
-        <button class="danger" onclick="delMember('${m.id}')">移除</button></div>`;
+        <button class="danger" onclick="editQuota('${mkey}',${m.quota_limit==null?'null':(Number(m.quota_limit)||0)},${Number(m.quota_used)||0})">额度</button>
+        <button class="danger" onclick="delMember('${mkey}')">移除</button></div>`;
     }
     h+='</div>';
   }
@@ -596,15 +632,24 @@ async function editQuota(memberId,limit,used){const v=prompt('设置每日额度
 async function delMember(id){if(!confirm('移除该成员？其账号会保留但解除归属。'))return;
   await api('/members/'+id,{method:'DELETE'});toast('成员已移除');loadTeams();loadAccounts();}
 
-async function assignAccount(account){const t=await api('/teams');const m=await api('/members');
-  if(!t.teams.length)return toast('请先创建团队并添加成员',false);
-  const opts=['<option value="">（不分配）</option>'].concat(t.teams.flatMap(x=>
-    m.members.filter(mm=>mm.team_id===x.id).map(mm=>`<option value="${mm.id}">${esc(x.name)} · ${esc(mm.name)}</option>`))).join('');
-  const cur=(m.members.find(mm=>(mm.account_ids||[]).includes(account))||{}).id||'';
-  const pick=prompt('将账号 '+account+' 分配给哪位成员？\n输入成员编号：\n'+opts.replace(/<option[^>]*>/g,'').replace(/<\/option>/g,'\n'),cur);
-  if(pick===null)return;
+let PICK_ACCOUNT='';
+async function assignAccount(account){const t=await api('/teams'),m=await api('/members');
+  const teams=t.teams||[],members=m.members||[];
+  if(!teams.length)return toast('请先创建团队并添加成员',false);
+  const cur=(members.find(mm=>(mm.account_ids||[]).includes(account))||{}).id||'';
+  const sel=document.getElementById('pickSel');
+  sel.innerHTML='<option value="">（不分配）</option>'+teams.flatMap(x=>
+    members.filter(mm=>mm.team_id===x.id).map(mm=>`<option value="${esc(mm.id)}">${esc(x.name)} · ${esc(mm.name)}</option>`)).join('');
+  sel.value=cur;
+  document.getElementById('pickAcc').textContent='账号：'+account;
+  PICK_ACCOUNT=account;
+  document.getElementById('pickOverlay').style.display='flex';}
+function closePick(){document.getElementById('pickOverlay').style.display='none';}
+async function confirmAssign(){const memberId=document.getElementById('pickSel').value||null;
+  closePick();
   const note=prompt('备注（留空则自动生成「团队·成员 的账号」）','');
-  await api('/accounts/'+encodeURIComponent(account)+'/assign',{method:'POST',body:JSON.stringify({member_id:pick||null,remark:note===''?undefined:note})});
+  if(note===null)return;
+  await api('/accounts/'+encodeURIComponent(PICK_ACCOUNT)+'/assign',{method:'POST',body:JSON.stringify({member_id:memberId,remark:note===''?undefined:note})});
   toast('已分配');loadTeams();loadAccounts();}
 async function editRemark(account){const j=await api('/accounts');
   const a=j.accounts.find(x=>x.account===account);
@@ -617,23 +662,23 @@ async function setProxy(acc){const p=prompt('设置代理（留空清除）',(aw
   await api('/accounts/'+encodeURIComponent(acc)+'/proxy',{method:'POST',body:JSON.stringify({proxy:p||null})});toast('代理已更新');loadAccounts();}
 
 async function loadModels(){const acc=document.getElementById('m_account').value;const kind=document.getElementById('m_kind').value;const usable=document.getElementById('m_usable').checked;
-  const j=await api(`/accounts/${encodeURIComponent(acc)}/models?kind=${kind}&usable_only=${usable}`);
-  document.getElementById('modelInfo').innerHTML=`账号类型：<b>${j.account_type}</b> · 模型 ${j.count} 个 · 当日免费权益模型：${j.free_benefit_keys.join(', ')||'无'}`;
+  const j=await api(`/accounts/${encodeURIComponent(acc)}/models?kind=${encodeURIComponent(kind)}&usable_only=${usable}`);
+  document.getElementById('modelInfo').innerHTML=`账号类型：<b>${esc(j.account_type||'-')}</b> · 模型 ${esc(j.count??0)} 个 · 当日免费权益模型：${(j.free_benefit_keys||[]).map(x=>esc(x)).join(', ')||'无'}`;
   const g=document.getElementById('modelsGrid');
-  g.innerHTML=j.models.map(m=>{const u=m.usable;const badge=u?'<span class="badge b-ok">可用</span>':'<span class="badge b-no">不可用</span>';
+  g.innerHTML=(j.models||[]).map(m=>{const u=m.usable;const badge=u?'<span class="badge b-ok">可用</span>':'<span class="badge b-no">不可用</span>';
     const vip=m.requires_membership?'<span class="tag">会员专属</span>':'';
-    return `<div class="model"><img src="${m.cover_url||''}" onerror="this.style.display='none'"><div class="nm">${m.name} ${badge}</div>
-    <div class="meta">${m.kind} · ${m.category||''} ${vip}<br>key: ${m.model_key||'-'}</div>
-    <div>${(m.labels||[]).map(l=>`<span class="tag">${l}</span>`).join('')}</div></div>`;}).join('');}
+    return `<div class="model"><img src="${safeUrl(m.cover_url)}" onerror="this.style.display='none'"><div class="nm">${esc(m.name||'-')} ${badge}</div>
+    <div class="meta">${esc(m.kind||'-')} · ${esc(m.category||'')} ${vip}<br>key: ${esc(m.model_key||'-')}</div>
+    <div>${(m.labels||[]).map(l=>`<span class="tag">${esc(l)}</span>`).join('')}</div></div>`;}).join('');}
 
 // ---------- Playground ----------
 function setPg(k){PG_TYPE=k;document.querySelectorAll('#pgType button').forEach(b=>b.classList.toggle('active',b.dataset.k===k));
   document.getElementById('pg_video_opts').style.display=k==='video'?'flex':'none';
   document.getElementById('pg_image_opts').style.display=k==='image'?'flex':'none';
   document.getElementById('pg_audio_opts').style.display=k==='audio'?'flex':'none';}
-async function pgTools(){const k=PG_TYPE;const j=await api('/tools?kind='+k);
-  document.getElementById('pgToolsBox').innerHTML=`推荐工具：<b>${j.recommended_tool||'无'}</b> · 共 ${j.count} 个${j.tags?'':''}<br>`+
-    (j.tools||[]).map(t=>'<span class="tag">'+t.name+'</span>').join(' ');}
+async function pgTools(){const k=PG_TYPE;const j=await api('/tools?kind='+encodeURIComponent(k));
+  document.getElementById('pgToolsBox').innerHTML=`推荐工具：<b>${esc(j.recommended_tool||'无')}</b> · 共 ${esc(j.count??0)} 个<br>`+
+    (j.tools||[]).map(t=>'<span class="tag">'+esc(t.name||'-')+'</span>').join(' ');}
 async function pgGen(){const k=PG_TYPE;const body={prompt:document.getElementById('pg_prompt').value,model:document.getElementById('pg_model').value||null,
   account:document.getElementById('pg_account').value||null,strategy:document.getElementById('pg_strategy').value,dry_run:document.getElementById('pg_dry').checked};
   if(k==='video'){body.duration=+document.getElementById('pg_dur').value;body.resolution=document.getElementById('pg_res').value;body.format=document.getElementById('pg_fmt').value;body.fps=+document.getElementById('pg_fps').value;body.aspect_ratio=document.getElementById('pg_ar').value||null;}
@@ -642,17 +687,19 @@ async function pgGen(){const k=PG_TYPE;const body={prompt:document.getElementByI
   const j=await api('/generate/'+k,{method:'POST',body:JSON.stringify(body)});
   document.getElementById('pgResult').innerHTML=renderGen(j);}
 
-function renderGen(j){let head=`<div class="kpi"><div><b>${j.account||'-'}</b><span>选用账号</span></div>`+
-  (j.selection_reason?`<div><b>${(j.selection_reason||'').slice(0,30)}</b><span>选号原因</span></div>`:'')+
-  (j.tool?`<div><b>${j.tool}</b><span>工具</span></div>`:'')+`</div>`;
+function renderGen(j){let head=`<div class="kpi"><div><b>${esc(j.account||'-')}</b><span>选用账号</span></div>`+
+  (j.selection_reason?`<div><b>${esc(String(j.selection_reason||'').slice(0,30))}</b><span>选号原因</span></div>`:'')+
+  (j.tool?`<div><b>${esc(j.tool)}</b><span>工具</span></div>`:'')+`</div>`;
   let media='';
   const res=j.result;
   if(res&&res.url){media=renderMedia(res.url,kindOf(res));}
-  return head+(media?'<div class="media-grid">'+media+'</div>':'')+`<pre>${JSON.stringify(j,null,2)}</pre>`;}
+  return head+(media?'<div class="media-grid">'+media+'</div>':'')+`<pre>${esc(JSON.stringify(j,null,2))}</pre>`;}
 function kindOf(res){if(res.media_type)return res.media_type;
   const f=(res.format||'').toLowerCase();if(['wav','mp3','m4a'].includes(f))return 'audio';if(['png','jpg','jpeg','webp'].includes(f))return 'image';return 'video';}
-function renderMedia(url,kind){const tag=kind==='image'?'<img src="'+url+'">':kind==='audio'?'<audio src="'+url+'" controls></audio>':'<video src="'+url+'" controls></video>';
-  return '<div class="media-card">'+tag+'<div class="small muted">'+kind+'</div></div>';}
+function renderMedia(url,kind){const src=safeUrl(url);
+  if(!src)return '<div class="media-card"><div class="small muted">结果地址不可用</div></div>';
+  const tag=kind==='image'?'<img src="'+src+'">':kind==='audio'?'<audio src="'+src+'" controls></audio>':'<video src="'+src+'" controls></video>';
+  return '<div class="media-card">'+tag+'<div class="small muted">'+esc(kind)+'</div></div>';}
 
 // ---------- 算力均摊 ----------
 async function balanceGen(){const body={prompt:document.getElementById('s_prompt').value,duration:+document.getElementById('s_dur').value,
@@ -667,8 +714,8 @@ async function balanceGen(){const body={prompt:document.getElementById('s_prompt
   h+=strat;
   if(j.assign_error)h+=`<p class="small" style="color:var(--bad)">分配提示：${esc(j.assign_error)}</p>`;
   h+=`<p class="small muted">分段来源：${j.openai_enabled?'智能分段规划':'确定性均分'} · 每算力点消耗 ${j.points_per_second} 点</p>`;
-  const plan=j.plan;
-  h+=`<div class="kpi">`+plan.segments.map(s=>`<div><b>${s.seconds}s</b><span>${esc(s.account||'无账号')}</span></div>`).join('')+`</div>`;
+  const plan=j.plan||{segments:[]};
+  h+=`<div class="kpi">`+(plan.segments||[]).map(s=>`<div><b>${esc(s.seconds??0)}s</b><span>${esc(s.account||'无账号')}</span></div>`).join('')+`</div>`;
   let grid='';
   for(const seg of (j.segments||[])){const r=seg.result;
     let card=`<div class="media-card"><div class="small">${seg.seconds}s · ${esc(seg.account||'-')} · ${esc(seg.tool||'')}</div>`;
@@ -680,10 +727,11 @@ async function balanceGen(){const body={prompt:document.getElementById('s_prompt
   document.getElementById('sResult').innerHTML=h;}
 
 // ---------- 监控 ----------
-async function monitorStatus(){const j=await api('/monitor/status');document.getElementById('monitorBox').innerHTML=
-  `<p class="small muted">运行中：${j.running} · 间隔：${j.interval}s · 上次巡检：${j.last_run_at?new Date(j.last_run_at*1000).toLocaleString():'未'}</p>`+
-  (j.results.length?`<table><thead><tr><th>账号</th><th>在线</th><th>类型</th><th>积分</th><th>免费算力</th><th>已签到</th><th>错误</th></tr></thead><tbody>`+
-  j.results.map(r=>`<tr><td>${r.account}</td><td>${r.ok?'是':'否'}</td><td>${r.account_type||'-'}</td><td>${r.points??'-'}</td><td>${r.free_power??'-'}</td><td>${r.checked_in?'是':'否'}</td><td>${r.error||'-'}</td></tr>`).join('')+'</tbody></table>':'<p class="muted">暂无巡检记录。</p>');}
+async function monitorStatus(){const j=await api('/monitor/status');const rs=j.results||[];
+  document.getElementById('monitorBox').innerHTML=
+  `<p class="small muted">运行中：${esc(j.running)} · 间隔：${esc(j.interval)}s · 上次巡检：${j.last_run_at?new Date(j.last_run_at*1000).toLocaleString():'未'}</p>`+
+  (rs.length?`<table><thead><tr><th>账号</th><th>在线</th><th>类型</th><th>积分</th><th>免费算力</th><th>权益</th><th>错误</th></tr></thead><tbody>`+
+  rs.map(r=>`<tr><td>${esc(r.account)}</td><td>${r.ok?'是':'否'}</td><td>${esc(r.account_type||'-')}</td><td>${esc(r.points??'-')}</td><td>${esc(r.free_power??'-')}</td><td>${r.checked_in?'是':'否'}</td><td>${esc(r.error||'-')}</td></tr>`).join('')+'</tbody></table>':'<p class="muted">暂无巡检记录。</p>');}
 async function monitorCheck(){const j=await api('/monitor/check',{method:'POST'});monitorStatus();toast('巡检完成');}
 
 // ---------- 团队统计 ----------
@@ -705,7 +753,7 @@ async function loadStats(){const j=await api('/stats');const o=j.overview||{};
     for(const m of ms){
       const q=m.quota_unlimited?'<span class="muted">不限额</span>':`${m.quota_used}/${m.quota_limit}`;
       const pct=m.quota_unlimited?'':`<div class="quota-bar"><div style="width:${Math.min(100,m.quota_percent||0)}%"></div></div><span class="small muted">${m.quota_percent||0}%</span>`;
-      h+=`<tr><td>${m.name}${m.note?`<div class="small muted">${m.note}</div>`:''}</td><td>${m.team_name||'-'}</td><td>${m.accounts}</td><td>${m.points}</td><td>${q}</td><td>${pct}</td><td>${m.request_count}</td></tr>`;
+      h+=`<tr><td>${esc(m.name)}${m.note?`<div class="small muted">${esc(m.note)}</div>`:''}</td><td>${esc(m.team_name||'-')}</td><td>${esc(m.accounts??0)}</td><td>${esc(m.points??0)}</td><td>${q}</td><td>${pct}</td><td>${esc(m.request_count??0)}</td></tr>`;
     }
     document.getElementById('statsMembers').innerHTML=h+'</tbody></table>';
   }
@@ -716,7 +764,7 @@ async function loadStats(){const j=await api('/stats');const o=j.overview||{};
     let h='<table><thead><tr><th>账号</th><th>成员</th><th>类型</th><th>算力点</th><th>免费算力</th><th>可用模型</th><th>调用/错误</th><th>到期</th></tr></thead><tbody>';
     for(const a of as){
       const ex=a.days_left==null?'<span class="muted">-</span>':(a.days_left<0?`<span class="badge b-dead">已到期</span>`:`<span class="badge ${a.days_left<=30?'b-warn':'b-free'}">${a.days_left}天</span>`);
-      h+=`<tr><td>${a.nickname||a.account}${a.note?`<div class="small muted">${a.note}</div>`:''}</td><td>${a.member_name||'-'}</td><td>${a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知'}</td><td>${a.points}</td><td>${a.free_power}</td><td>${a.model_usable_count}/${a.model_total_count}</td><td>${a.request_count}/${a.error_count}</td><td>${ex}</td></tr>`;
+      h+=`<tr><td>${esc(a.nickname||a.account)}${a.note?`<div class="small muted">${esc(a.note)}</div>`:''}</td><td>${esc(a.member_name||'-')}</td><td>${a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知'}</td><td>${esc(a.points??0)}</td><td>${esc(a.free_power??0)}</td><td>${esc(a.model_usable_count??0)}/${esc(a.model_total_count??0)}</td><td>${esc(a.request_count??0)}/${esc(a.error_count??0)}</td><td>${ex}</td></tr>`;
     }
     document.getElementById('statsAccounts').innerHTML=h+'</tbody></table>';
   }
@@ -726,7 +774,7 @@ async function loadStats(){const j=await api('/stats');const o=j.overview||{};
 async function loadNotify(){const j=await api('/notify/status');
   const ch=j.channels||[];
   document.getElementById('notifyChannels').innerHTML=ch.map(c=>
-    `<span class="badge ${c.enabled?'b-alive':'b-free'}">${c.label}：${c.enabled?'已启用':'未启用'}${c.enabled&&!c.configured?'（未配置）':''}</span>`).join(' ');
+    `<span class="badge ${c.enabled?'b-alive':'b-free'}">${esc(c.label||c.name||'-')}：${c.enabled?'已启用':'未启用'}${c.enabled&&!c.configured?'（未配置）':''}</span>`).join(' ');
   const cfgd=j.config||{};
   const em=cfgd.email||{},wc=cfgd.wecom||{};
   document.getElementById('nt_email_on').checked=!!em.enabled;
@@ -758,7 +806,7 @@ async function loadNotify(){const j=await api('/notify/status');
   const hist=j.history||[];
   document.getElementById('notifyHistory').innerHTML=hist.length?
     '<table><thead><tr><th>时间</th><th>通道</th><th>事件</th><th>结果</th></tr></thead><tbody>'+
-    hist.map(r=>`<tr><td>${new Date(r.at*1000).toLocaleString()}</td><td>${r.channel}</td><td>${r.event_label||r.event}</td><td>${r.ok?'<span class="badge b-alive">成功</span>':`<span class="badge b-dead">失败</span> ${r.error||''}`}</td></tr>`).join('')+'</tbody></table>'
+    hist.map(r=>`<tr><td>${new Date((r.at||0)*1000).toLocaleString()}</td><td>${esc(r.channel||'-')}</td><td>${esc(r.event_label||r.event||'-')}</td><td>${r.ok?'<span class="badge b-alive">成功</span>':`<span class="badge b-dead">失败</span> ${esc(r.error||'')}`}</td></tr>`).join('')+'</tbody></table>'
     :'<p class="muted">暂无发送记录。</p>';
 }
 async function saveNotify(){
@@ -823,6 +871,11 @@ async function loadTerms(){try{const r=await fetch(API+'/terms');const j=await r
   document.getElementById('termsTitle').textContent=j.title||'使用条例与合规声明';
   document.getElementById('termsText').innerHTML=String(j.text||'').split('\n').filter(x=>x.trim()).map(x=>`<p>${esc(x)}</p>`).join('');
   TERMS_OK=false;document.getElementById('termsAgree').checked=false;document.getElementById('termsBtn').disabled=true;
+  document.getElementById('termsTip').textContent='请滚动阅读完整条款后，方可勾选同意。';
+  // 条款不足一屏时不会触发 scroll 事件，必须主动判定，否则按钮永远禁用、用户被卡在遮罩里。
+  requestAnimationFrame(()=>{const el=document.getElementById('termsText');
+    if(el.scrollHeight<=el.clientHeight+8){TERMS_OK=true;
+      document.getElementById('termsTip').textContent='已阅读完整条款，可以勾选同意。';termsCheck();}});
   return j;}catch(e){document.getElementById('termsText').innerHTML='<p style="color:var(--bad)">使用条例加载失败，请检查服务是否正常。</p>';return null;}}
 function termsScrolled(){const el=document.getElementById('termsText');
   if(el.scrollTop+el.clientHeight>=el.scrollHeight-8){TERMS_OK=true;
@@ -833,16 +886,24 @@ async function acceptTerms(){if(!TERMS_OK||!document.getElementById('termsAgree'
   try{const r=await fetch(API+'/terms/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     if(!r.ok){toast('记录同意状态失败',false);return;}
     document.getElementById('termsOverlay').style.display='none';
+    document.getElementById('termsClose').classList.add('hidden');
     toast('已同意使用条例');
     if(_token()){document.getElementById('loginOverlay').style.display='none';loadHealth();loadAccounts();loadExpiry();}
     else showLogin();}catch(e){toast('网络错误',false);}}
-async function showTerms(){await loadTerms();document.getElementById('loginOverlay').style.display='none';
-  document.getElementById('termsOverlay').style.display='flex';}
+async function showTerms(){const j=await loadTerms();
+  document.getElementById('loginOverlay').style.display='none';
+  document.getElementById('termsOverlay').style.display='flex';
+  // 已同意过：允许直接关闭，不必再走一遍「滚动 + 勾选 + 同意」。
+  document.getElementById('termsClose').classList.toggle('hidden',!(j&&j.accepted));}
+function closeTerms(){document.getElementById('termsOverlay').style.display='none';
+  if(_token()){document.getElementById('loginOverlay').style.display='none';}
+  else showLogin();}
 
 // ---------- 初始化：先条款闸门，再登录 ----------
 (async function init(){
   const t=await loadTerms();
   if(t&&t.need_accept){document.getElementById('termsOverlay').style.display='flex';
+    document.getElementById('termsClose').classList.add('hidden');
     document.getElementById('loginOverlay').style.display='none';return;}
   document.getElementById('termsOverlay').style.display='none';
   if(_token()){document.getElementById('loginOverlay').style.display='none';loadHealth();loadAccounts();loadExpiry();}

@@ -88,6 +88,17 @@ class PhoneLogin(AuthMethod):
         if proxy:
             self._client.proxies = proxy  # type: ignore[attr-defined]
 
+    # ----- 资源释放 -----
+    def close(self) -> None:
+        """释放底层 httpx 连接池；面板每次发码/登录都会新建本对象，必须关闭。"""
+        self._client.close()
+
+    def __enter__(self) -> "PhoneLogin":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     # ----- 下发验证码 -----
     def send_code(self, phone: str, extra: Optional[dict] = None) -> dict:
         """请求下发短信验证码。返回服务端原始响应。"""

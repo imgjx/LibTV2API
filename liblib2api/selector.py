@@ -55,7 +55,6 @@ class AccountSelector:
         exclude: Optional[set] = None,
     ) -> list[Account]:
         exclude = exclude or set()
-        now = int(time.time())
         cands: list[Account] = []
         for a in self.store.list():
             if a.status != "active":

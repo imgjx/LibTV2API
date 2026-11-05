@@ -85,7 +85,7 @@ class AudioGenerateRequest:
             errs.append("prompt 不能为空")
         if self.fmt not in AUDIO_FORMATS:
             errs.append(f"format 必须是 {AUDIO_FORMATS} 之一")
-        if self.duration not in AUDIO_DURATIONS and self.duration <= 0:
+        if not isinstance(self.duration, int) or self.duration <= 0:
             errs.append("duration 必须为正整数（秒）")
         return errs
 

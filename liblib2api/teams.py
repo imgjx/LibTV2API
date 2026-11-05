@@ -208,11 +208,9 @@ class TeamStore:
             team = self._teams.pop(str(team_id), None)
             if not team:
                 return False
+            # 成员随团队一并移除；账号侧的归属由调用方（API 层）统一清理。
             for mid in list(team.member_ids):
-                member = self._members.pop(mid, None)
-                if member:
-                    for acc_id in member.account_ids:
-                        member.account_ids.remove(acc_id)
+                self._members.pop(mid, None)
             self.save()
             return True
 

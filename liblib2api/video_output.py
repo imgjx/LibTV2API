@@ -79,8 +79,10 @@ class VideoGenerateRequest:
         if self.resolution not in RESOLUTIONS:
             errs.append(f"resolution 必须是 {list(RESOLUTIONS)} 之一")
         if allow_any_duration:
-            if not (isinstance(self.duration, int) and 1 <= self.duration <= 30):
-                errs.append("duration 必须为 1~30 的整数（秒）")
+            # 算力均摊允许总时长到 120 秒；单账号可独立完成时会以整段时长生成，
+            # 这里的上限需与 /generate/video/balance 的 duration 范围保持一致。
+            if not (isinstance(self.duration, int) and 1 <= self.duration <= 120):
+                errs.append("duration 必须为 1~120 的整数（秒）")
         elif self.duration not in DURATIONS:
             errs.append(f"duration 必须是 {DURATIONS} 之一（秒）")
         if self.fps not in (24, 25, 30):
