@@ -218,6 +218,7 @@ class PhoneLogin(AuthMethod):
         webid = pick("webid", "webId") or generate_webid()
         nickname = pick("nickname", "nickName", "userName", "username", "name")
         user_id = pick("userId", "user_id", "uid", "id")
+        issued_at = int(time.time())
 
         return Credentials(
             access_token=access,
@@ -235,6 +236,12 @@ class PhoneLogin(AuthMethod):
                 "nickname": nickname,
                 "user_id": user_id,
                 "cid": payload.get("cid"),
+                # 令牌签发时刻与有效期必须一并落地，否则账号会在毫无预警的
+                # 情况下突然「未登录」。平台登录响应未必给 expires_in，
+                # 此时按实测寿命（约 2.5 天）估算一个保守到期点。
+                "token_issued_at": issued_at,
+                "token_expires_at": expires_at,
+                "token_expires_estimated": expires_at is None,
             },
         )
 

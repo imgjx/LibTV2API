@@ -20,6 +20,7 @@ from typing import Iterator, Optional
 
 import liblib2api.config as cfg
 from liblib2api.credentials import Credentials
+from liblib2api.token_expiry import TOKEN_TTL_ESTIMATE
 
 
 @dataclass
@@ -217,12 +218,28 @@ class AccountStore:
             except (json.JSONDecodeError, OSError):
                 return
             items = raw.get("accounts") if isinstance(raw, dict) else raw
+            migrated = False
             for item in items or []:
                 try:
                     acc = Account.from_dict(item)
+                    # 老账号没有令牌签发时刻，用首次入库时间回填。
+                    # 否则这类账号在面板上永远显示「令牌有效期未知」，
+                    # 无法提前知道该重新登录了。
+                    if not acc.extra.get("token_issued_at") and acc.created_at:
+                        acc.extra["token_issued_at"] = int(acc.created_at)
+                        acc.extra.setdefault(
+                            "token_expires_at",
+                            int(acc.created_at) + TOKEN_TTL_ESTIMATE,
+                        )
+                        migrated = True
                     self._accounts[self._key(acc)] = acc
                 except Exception:
                     continue
+            if migrated:
+                try:
+                    self.save()
+                except Exception:
+                    pass
 
     def save(self) -> None:
         with self._lock:

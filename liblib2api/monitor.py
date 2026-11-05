@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 from liblib2api.accounts import AccountStore
 from liblib2api.exceptions import ApiError, AuthError
+from liblib2api.token_expiry import token_info
 from liblib2api.webapi import WebApiClient
 
 DEFAULT_INTERVAL = 600  # 10 分钟
@@ -49,10 +50,14 @@ class AccountMonitor:
         interval: int = DEFAULT_INTERVAL,
         client_factory: Optional[Callable[[object], WebApiClient]] = None,
         auto_claim: bool = True,
+        token_warn_seconds: int = 24 * 3600,
+        on_token_expiring: Optional[Callable[[object, dict], None]] = None,
     ):
         self.store = store
         self.interval = interval
         self.auto_claim = auto_claim
+        self.token_warn_seconds = token_warn_seconds
+        self.on_token_expiring = on_token_expiring
         self._client_factory = client_factory or self._default_client
         self._stop = False
         self._thread: Optional[threading.Thread] = None
@@ -168,9 +173,33 @@ class AccountMonitor:
                 results.append(self._check_one(acc))
             except Exception as e:  # noqa: BLE001
                 results.append(CheckResult(account=acc.account, ok=False, error=str(e)[:200]))
+        self._check_token_expiry()
         self.last_run_at = int(time.time())
         self.last_results = results
         return results
+
+    def _check_token_expiry(self) -> None:
+        """检查登录令牌是否临近过期，必要时回调告警。
+
+        平台手机号令牌寿命约 2～3 天且没有续期端点，属于**正常到期**。
+        若不提前提醒，账号会在无人值守时突然不可用，极易被误判成账号被限制。
+        """
+        if self.on_token_expiring is None:
+            return
+        for acc in self.store.list():
+            if not acc.access_token:
+                continue
+            info = token_info(acc.extra)
+            left = info.get("seconds_left")
+            if left is None:
+                continue
+            if left > self.token_warn_seconds:
+                continue
+            try:
+                self.on_token_expiring(acc, info)
+            except Exception:  # noqa: BLE001
+                # 告警失败不应影响巡检主流程
+                pass
 
     def _loop(self) -> None:
         self.running = True

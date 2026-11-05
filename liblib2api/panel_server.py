@@ -45,6 +45,7 @@ from liblib2api.credentials import CredentialStore
 from liblib2api.analytics import team_stats
 from liblib2api.exceptions import ApiError, AuthError, ModelUnavailableError
 from liblib2api.expiry import expiry_info
+from liblib2api.token_expiry import token_info
 from liblib2api.notify import (
     EVENT_ACCOUNT_INVALID,
     EVENT_CLAIM_FAILED,
@@ -54,6 +55,7 @@ from liblib2api.notify import (
     EVENT_POINTS_LOW,
     EVENT_QUOTA_EXHAUSTED,
     EVENT_QUOTA_NEAR_LIMIT,
+    EVENT_TOKEN_EXPIRING,
     NotifyCenter,
     NotifyMessage,
 )
@@ -108,7 +110,29 @@ app.add_middleware(
 _store = AccountStore()
 _teams = TeamStore()
 _selector = AccountSelector(_store, _teams)
-_monitor = AccountMonitor(_store, interval=int(os.environ.get("LIBLIB_MONITOR_INTERVAL", "600")))
+
+
+def _on_token_expiring(acc, info: dict) -> None:
+    """令牌临近过期时发出提醒（由监控巡检回调）。
+
+    这里用函数而非直接调用 _notify，是因为 _notify 定义在本文件后部，
+    而监控实例需要在模块加载期就构造好。
+    """
+    label = acc.nickname or acc.account
+    if info.get("expired"):
+        title = f"登录令牌已过期，请重新登录：{label}"
+        level = "critical"
+    else:
+        title = f"登录令牌即将过期（{info.get('text')}），请重新登录：{label}"
+        level = "warning"
+    _notify(EVENT_TOKEN_EXPIRING, title, f"账号：{acc.account}", level=level)
+
+
+_monitor = AccountMonitor(
+    _store,
+    interval=int(os.environ.get("LIBLIB_MONITOR_INTERVAL", "600")),
+    on_token_expiring=_on_token_expiring,
+)
 
 _PENDING_WECHAT: dict[str, dict] = {}
 
@@ -388,6 +412,8 @@ def _account_view(acc: Account) -> dict:
         }
     # 会员到期提醒
     expiry = expiry_info(acc.member_until, warn_days=cfg.MEMBER_EXPIRY_WARN_DAYS)
+    # 登录令牌有效期（平台令牌寿命约 2～3 天且无法自动续期，需提前预警）
+    token = token_info(acc.extra)
     return {
         "account": acc.account,
         "nickname": acc.nickname,
@@ -428,6 +454,16 @@ def _account_view(acc: Account) -> dict:
         "member_until_text": expiry.get("member_until_text"),
         "expiring_soon": expiry.get("expiring_soon", False),
         "expired": expiry.get("expired", False),
+        # 登录令牌有效期
+        "token_expires_at": token.get("expires_at"),
+        "token_expires_at_text": token.get("expires_at_text"),
+        "token_seconds_left": token.get("seconds_left"),
+        "token_level": token.get("level"),
+        "token_level_text": token.get("level_text"),
+        "token_text": token.get("text"),
+        "token_expiring_soon": token.get("expiring_soon", False),
+        "token_expired": token.get("expired", False),
+        "token_expiry_estimated": token.get("estimated", False),
         "request_count": acc.request_count,
         "error_count": acc.error_count,
         "last_used_at": acc.last_used_at,
@@ -1126,6 +1162,25 @@ def run_alerts(force: bool = False) -> dict:
                          "title": f"登录态已过期，请重新登录：{acc.nickname or acc.account}",
                          "action": "重新登录"})
 
+    # 2.5) 登录令牌即将过期（平台令牌寿命约 2～3 天且无法自动续期，需提前提醒）
+    token_hours = int((rules.get(EVENT_TOKEN_EXPIRING) or {}).get("hours") or 24)
+    for acc in _store.list():
+        if not acc.access_token or acc.auth_expired:
+            continue
+        info = token_info(acc.extra)
+        left = info.get("seconds_left")
+        if left is None or left > token_hours * 3600:
+            continue
+        label = acc.nickname or acc.account
+        if info.get("expired"):
+            hits.append({"event": EVENT_TOKEN_EXPIRING, "account": acc.account,
+                         "title": f"登录令牌已过期，请重新登录：{label}",
+                         "action": "重新登录"})
+        else:
+            hits.append({"event": EVENT_TOKEN_EXPIRING, "account": acc.account,
+                         "title": f"登录令牌即将过期（{info.get('text')}），请重新登录：{label}",
+                         "action": "重新登录"})
+
     # 3) 算力点余额偏低
     for acc in _store.list():
         pts = acc.points
@@ -1153,6 +1208,8 @@ def run_alerts(force: bool = False) -> dict:
         body = f"账号：{hit['account']}" if hit.get("account") else "团队成员额度"
         level = "critical" if event in (EVENT_MEMBER_EXPIRED, EVENT_ACCOUNT_INVALID,
                                         EVENT_QUOTA_EXHAUSTED) else "warning"
+        if event == EVENT_TOKEN_EXPIRING:
+            level = "warning"
         records = _notify(event, hit["title"], body, level=level, force=force)
         sent.append({**hit, "sent": len(records)})
     return {"checked": len(_store.list()), "hits": sent, "count": len(sent)}
@@ -1394,6 +1451,11 @@ def phone_login(payload: dict = Body(...)):
     extra.update({
         "cookies": creds.extra.get("cookies") or {},
         "cid": creds.extra.get("cid"),
+        # 令牌签发时刻与到期时刻必须落库：平台令牌寿命约 2～3 天且无法自动续期，
+        # 不记录的话账号会毫无预警地突然「未登录」，容易被误判成账号退登。
+        "token_issued_at": creds.extra.get("token_issued_at") or int(time.time()),
+        "token_expires_at": creds.extra.get("token_expires_at"),
+        "token_expires_estimated": creds.extra.get("token_expires_estimated", True),
     })
 
     if old is not None:

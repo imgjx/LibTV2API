@@ -490,7 +490,7 @@ async function loadHealth(){try{const h=await api('/accounts');document.getEleme
 async function loadAccounts(){const j=await api('/accounts');const tb=document.getElementById('accountsTable');
   const list=j.accounts||[];
   if(!list.length){tb.innerHTML='<p class="muted">暂无账号。点「手机号登录 / 微信扫码 / 导入」添加，登录后会自动识别类型。</p>';return;}
-  let h='<table><thead><tr><th>账号</th><th>类型</th><th>团队 / 成员</th><th>备注</th><th>积分</th><th>免费算力</th><th>额度</th><th>会员到期</th><th>活性</th><th>可用模型</th><th>权益</th><th>代理</th><th>操作</th></tr></thead><tbody>';
+  let h='<table><thead><tr><th>账号</th><th>类型</th><th>团队 / 成员</th><th>备注</th><th>积分</th><th>免费算力</th><th>额度</th><th>会员到期</th><th>登录令牌</th><th>活性</th><th>可用模型</th><th>权益</th><th>代理</th><th>操作</th></tr></thead><tbody>';
   for(const a of list){
     const label=a.account_type_label||(a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知');
     const tb_=label==='VIP'?'<span class="badge b-member">VIP</span>':label==='免费'?'<span class="badge b-free">免费</span>':'<span class="badge b-free">未知</span>';
@@ -501,9 +501,10 @@ async function loadAccounts(){const j=await api('/accounts');const tb=document.g
     const team=a.team_name?esc(a.team_name+(a.member_display_name?' · '+a.member_display_name:'')):(a.member_display_name?esc(a.member_display_name):'<span class="muted">未分配</span>');
     const q=a.quota?quotaCell(a.quota):'<span class="muted">—</span>';
     const ex=expiryCell(a);
+    const tk=tokenCell(a);
     const k=aq(a.account);
     h+=`<tr><td>${esc(a.account)}${sub}</td><td>${tb_}</td><td>${team}</td><td class="small">${a.remark?esc(a.remark):'<span class="muted">—</span>'}</td>
-    <td>${esc(a.points??'-')}</td><td>${esc(a.free_power??'-')}</td><td>${q}</td><td>${ex}</td><td>${alive}</td>
+    <td>${esc(a.points??'-')}</td><td>${esc(a.free_power??'-')}</td><td>${q}</td><td>${ex}</td><td>${tk}</td><td>${alive}</td>
     <td>${esc(a.model_usable_count??0)}/${esc(a.model_total_count??0)}</td><td class="small">${esc(a.last_claim||'-')}</td><td>${a.proxy?esc(a.proxy.slice(0,18))+'…':'-'}</td>
     <td><button class="danger" onclick="assignAccount('${k}')">分配</button> <button class="danger" onclick="editRemark('${k}')">备注</button> <button class="danger" onclick="setProxy('${k}')">代理</button> <button class="danger" onclick="syncOne('${k}')">同步</button>${a.auth_expired?' <button class="primary" onclick="relogin(\''+k+'\')">重新登录</button>':''} <button class="danger" onclick="del('${k}')">删</button></td></tr>`;
   }
@@ -521,6 +522,17 @@ function expiryCell(a){const lv=a.member_expiry_level||'unknown';
   const cls=lv==='critical'||lv==='expired'?'e-critical':lv==='warning'?'e-warning':lv==='ok'?'e-ok':'e-unknown';
   let txt=a.member_until_days==null?'—':(a.member_until_days<0?`已过期 ${-a.member_until_days} 天`:`剩 ${a.member_until_days} 天`);
   return `<span class="expiry ${cls}" title="${esc(a.member_until_text||'')}">${txt}</span>`;}
+
+// 登录令牌有效期：平台令牌寿命约 2～3 天且无续期端点，过期属正常到期，
+// 提前显示剩余时间，避免账号在无人值守时突然不可用。
+function tokenCell(a){const lv=a.token_level||'unknown';
+  const cls=lv==='critical'||lv==='expired'?'e-critical':lv==='warning'?'e-warning':lv==='ok'?'e-ok':'e-unknown';
+  const txt=a.token_text||'—';
+  const tip=(a.token_expires_at_text?('预计到期：'+a.token_expires_at_text):'')
+    +(a.token_expiry_estimated?'（按实测寿命估算）':'')
+    +(lv==='critical'?'；请尽快重新登录':'')
+    +(lv==='expired'?'；令牌已过期，请重新登录':'');
+  return `<span class="expiry ${cls}" title="${esc(tip)}">${esc(txt)}</span>`;}
 
 function quotaCell(q){if(q.unlimited)return '<span class="muted">不限</span>';
   const pct=Math.min(100,Math.round((q.used||0)/(q.limit||1)*100));
@@ -804,12 +816,13 @@ async function loadNotify(){const j=await api('/notify/status');
   document.getElementById('nt_wecom_url').value=wc.webhook_url||'';
   document.getElementById('nt_wecom_men').value=(wc.mentioned||[]).join(',');
   // 规则
-  const rules=j.rules||{};const RULES=[['member_expiring','会员即将到期提醒'],['member_expired','会员已到期'],['account_invalid','登录态过期'],['points_low','算力点余额偏低'],['quota_near_limit','成员额度接近上限'],['quota_exhausted','成员额度已用尽'],['claim_failed','权益领取失败'],['daily_digest','每日权益领取摘要']];
+  const rules=j.rules||{};const RULES=[['member_expiring','会员即将到期提醒'],['member_expired','会员已到期'],['account_invalid','登录态过期'],['token_expiring','登录令牌即将过期'],['points_low','算力点余额偏低'],['quota_near_limit','成员额度接近上限'],['quota_exhausted','成员额度已用尽'],['claim_failed','权益领取失败'],['daily_digest','每日权益领取摘要']];
   let h='<table><thead><tr><th>告警项</th><th>启用</th><th>阈值</th></tr></thead><tbody>';
   for(const [k,label] of RULES){
     const r=rules[k]||{};
     let extra='';
     if(k==='member_expiring')extra=`<input id="rule_${k}_days" type="number" value="${r.days??30}" style="width:80px"> 天`;
+    else if(k==='token_expiring')extra=`<input id="rule_${k}_hours" type="number" value="${r.hours??24}" style="width:80px"> 小时`;
     else if(k==='points_low')extra=`<input id="rule_${k}_threshold" type="number" value="${r.threshold??100}" style="width:90px"> 点`;
     else if(k==='quota_near_limit')extra=`<input id="rule_${k}_percent" type="number" value="${r.percent??90}" style="width:80px"> %`;
     h+=`<tr><td>${label}</td><td><input type="checkbox" id="rule_${k}_on" ${r.enabled?'checked':''}></td><td>${extra||'-'}</td></tr>`;
@@ -843,12 +856,13 @@ async function saveNotify(){
   const j=await api('/notify/config',{method:'POST',body:JSON.stringify(body)});
   toast(j.ok?'通知配置已保存':'保存失败');loadNotify();}
 async function saveRules(){
-  const EVENTS=['member_expiring','member_expired','account_invalid','points_low','quota_near_limit','quota_exhausted','claim_failed','daily_digest'];
+  const EVENTS=['member_expiring','member_expired','account_invalid','token_expiring','points_low','quota_near_limit','quota_exhausted','claim_failed','daily_digest'];
   for(const e of EVENTS){
     const on=document.getElementById('rule_'+e+'_on');
     if(!on)continue;
     const payload={enabled:on.checked};
     const d=document.getElementById('rule_'+e+'_days');if(d)payload.days=+d.value||30;
+    const h=document.getElementById('rule_'+e+'_hours');if(h)payload.hours=+h.value||24;
     const t=document.getElementById('rule_'+e+'_threshold');if(t)payload.threshold=+t.value||100;
     const p=document.getElementById('rule_'+e+'_percent');if(p)payload.percent=+p.value||90;
     await api('/notify/rule/'+e,{method:'POST',body:JSON.stringify(payload)});

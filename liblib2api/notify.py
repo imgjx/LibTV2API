@@ -31,6 +31,7 @@ import httpx
 EVENT_MEMBER_EXPIRING = "member_expiring"      # 会员即将到期
 EVENT_MEMBER_EXPIRED = "member_expired"        # 会员已到期
 EVENT_ACCOUNT_INVALID = "account_invalid"      # 登录态过期（需重新获取 token）
+EVENT_TOKEN_EXPIRING = "token_expiring"        # 登录令牌即将过期（需提前重新登录）
 EVENT_POINTS_LOW = "points_low"                # 算力点余额偏低
 EVENT_QUOTA_NEAR_LIMIT = "quota_near_limit"    # 成员额度接近上限
 EVENT_QUOTA_EXHAUSTED = "quota_exhausted"      # 成员额度已用尽
@@ -41,6 +42,7 @@ EVENT_LABELS = {
     EVENT_MEMBER_EXPIRING: "会员即将到期",
     EVENT_MEMBER_EXPIRED: "会员已到期",
     EVENT_ACCOUNT_INVALID: "登录态过期",
+    EVENT_TOKEN_EXPIRING: "登录令牌即将过期",
     EVENT_POINTS_LOW: "算力点余额偏低",
     EVENT_QUOTA_NEAR_LIMIT: "成员额度接近上限",
     EVENT_QUOTA_EXHAUSTED: "成员额度已用尽",
@@ -53,6 +55,9 @@ DEFAULT_RULES: dict[str, dict] = {
     EVENT_MEMBER_EXPIRING: {"enabled": True, "days": 30},
     EVENT_MEMBER_EXPIRED: {"enabled": True},
     EVENT_ACCOUNT_INVALID: {"enabled": True},
+    # 令牌有效期由平台决定（约 2～3 天）且无法自动续期，
+    # 因此提前一天提醒，避免账号在无人值守时突然不可用。
+    EVENT_TOKEN_EXPIRING: {"enabled": True, "hours": 24},
     EVENT_POINTS_LOW: {"enabled": True, "threshold": 100},
     EVENT_QUOTA_NEAR_LIMIT: {"enabled": True, "percent": 90},
     EVENT_QUOTA_EXHAUSTED: {"enabled": True},
