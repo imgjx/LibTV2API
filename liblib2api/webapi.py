@@ -50,11 +50,15 @@ class WebApiClient:
         proxy: Optional[str] = None,
         timeout: int = cfg.HTTP_TIMEOUT,
         origin: str = cfg.PHONE_ORIGIN,
+        cookies: Optional[dict] = None,
+        cid: Optional[str] = None,
     ):
         self.access_token = access_token
         self.webid = webid
         self.timeout = timeout
         self.origin = origin
+        self.cookies = dict(cookies or {})
+        self.cid = cid
         self._client = httpx.Client(
             timeout=timeout,
             follow_redirects=True,
@@ -73,6 +77,12 @@ class WebApiClient:
         )
         if webid:
             self._client.headers["Webid"] = webid
+        if cid:
+            self._client.headers["cid"] = cid
+        if self.cookies:
+            # 登录态 cookie 与 token 一并使用：token 过期而 cookie 仍有效时，
+            # 可据此向 passport 申请新的 token（见 auth/phone.py 的续期流程）。
+            self._client.cookies.update({k: v for k, v in self.cookies.items() if v})
         if proxy:
             self._client.proxies = proxy  # type: ignore[attr-defined]
 
@@ -101,7 +111,16 @@ class WebApiClient:
             raise ApiError(f"响应非 JSON（{url}）：{resp.text[:200]}")
         if isinstance(payload, dict) and payload.get("code") not in (0, None):
             msg = payload.get("msg") or payload.get("message") or "未知错误"
-            raise ApiError(f"接口返回错误 [{payload.get('code')}]：{msg}")
+            code = payload.get("code")
+            # 平台对「token 过期 / 未登录」返回 HTTP 200 + body code=401。
+            # 这属于登录态问题而非接口故障，必须单独归类，
+            # 否则会被当成账号被限制，并触发「账号失效」误报。
+            code_num = int(code) if str(code).isdigit() else None
+            if code_num == 401 or any(
+                kw in str(msg).lower() for kw in ("未登录", "no login", "not login", "登录已过期", "token")
+            ):
+                raise AuthError(f"登录态已过期，请重新登录（{msg}）")
+            raise ApiError(f"接口返回错误 [{code}]：{msg}")
         return payload.get("data") if isinstance(payload, dict) else payload
 
     # ----- 用户 / 会员 -----

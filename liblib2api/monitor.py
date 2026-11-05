@@ -63,7 +63,13 @@ class AccountMonitor:
 
     @staticmethod
     def _default_client(acc) -> WebApiClient:
-        return WebApiClient(access_token=acc.access_token, webid=acc.webid, proxy=acc.proxy)
+        return WebApiClient(
+            access_token=acc.access_token,
+            webid=acc.webid,
+            proxy=acc.proxy,
+            cookies=(acc.extra or {}).get("cookies") or None,
+            cid=(acc.extra or {}).get("cid"),
+        )
 
     def _check_one(self, acc) -> CheckResult:
         today = time.strftime("%Y-%m-%d")
@@ -106,19 +112,33 @@ class AccountMonitor:
                     has_get_power=member.get("hasGetPower")
                     if member.get("hasGetPower") is not None
                     else acc.has_get_power,
-                    status="active" if acc.status == "error" else acc.status,
+                    status="active" if acc.status in ("error", "auth_expired") else acc.status,
+                    auth_expired=False,
                 )
-            except (ApiError, AuthError) as e:
+            except AuthError as e:
+                # 登录态过期（平台拒绝当前 token）：账号本身未必有问题，
+                # 重新获取 token 后即可继续用，故标记为 auth_expired 而非账号异常。
                 self.store.update(
-                    acc.account, alive=False, alive_error=str(e)[:200],
-                    last_alive_check=int(time.time()), status="error",
+                    acc.account, alive=False, auth_expired=True,
+                    alive_error=str(e)[:200],
+                    last_alive_check=int(time.time()), status="auth_expired",
+                )
+                res.ok = False
+                res.error = str(e)
+                return res
+            except ApiError as e:
+                # 接口/网络类故障属于偶发问题，不能据此判定账号不可用，
+                # 只记录错误并保留上一次的有效状态，等下一轮巡检再确认。
+                self.store.update(
+                    acc.account, alive_error=str(e)[:200],
+                    last_alive_check=int(time.time()),
                 )
                 res.ok = False
                 res.error = str(e)
                 return res
             except Exception as e:  # noqa: BLE001
                 self.store.update(
-                    acc.account, alive=False, alive_error=str(e)[:200],
+                    acc.account, alive_error=str(e)[:200],
                     last_alive_check=int(time.time()),
                 )
                 res.ok = False

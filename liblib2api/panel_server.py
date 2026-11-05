@@ -166,6 +166,22 @@ def _type_label(at: Optional[str]) -> str:
     return cfg.ACCOUNT_TYPE_LABEL.get(at or "unknown", "未知")
 
 
+def _status_label(acc: Account) -> str:
+    """账号状态的中文标签。
+
+    区分「登录态过期」与「账号不可用」：前者只需重新获取 token，
+    账号本身并未被限制，文案上不能混为一谈，否则会误导使用者。
+    """
+    if acc.auth_expired or acc.status == "auth_expired":
+        return "登录态过期"
+    return {
+        "active": "正常",
+        "disabled": "已停用",
+        "error": "异常",
+        "expired": "已过期",
+    }.get(acc.status or "active", acc.status or "正常")
+
+
 # ---------------------------------------------------------------------------
 # 管理员 & API Key 鉴权
 # ---------------------------------------------------------------------------
@@ -324,7 +340,13 @@ app.router.lifespan_context = lifespan
 # 工具
 # ---------------------------------------------------------------------------
 def _client_for(acc: Account) -> WebApiClient:
-    return WebApiClient(access_token=acc.access_token, webid=acc.webid, proxy=acc.proxy)
+    return WebApiClient(
+        access_token=acc.access_token,
+        webid=acc.webid,
+        proxy=acc.proxy,
+        cookies=(acc.extra or {}).get("cookies") or None,
+        cid=(acc.extra or {}).get("cid"),
+    )
 
 
 def _record_quota_usage(account: str, points: float) -> None:
@@ -385,6 +407,8 @@ def _account_view(acc: Account) -> dict:
         "has_get_power": acc.has_get_power,
         "alive": acc.alive,
         "alive_error": acc.alive_error,
+        "auth_expired": acc.auth_expired,
+        "status_label": _status_label(acc),
         "last_alive_check": acc.last_alive_check,
         "last_sync": acc.last_sync,
         "last_claim": acc.last_claim,
@@ -467,10 +491,16 @@ def _sync_account(acc: Account) -> dict:
                 free_power = c.free_power().get("freePower")
             except Exception:  # noqa: BLE001
                 free_power = None
+    except AuthError as e:
+        # 登录态过期：不是账号被限制，标记为待重新登录，便于一键换 token 恢复。
+        _store.update(acc.account, status="auth_expired", auth_expired=True,
+                      alive=False, alive_error=str(e)[:200],
+                      last_alive_check=int(time.time()))
+        raise HTTPException(401, f"登录态已过期，请重新登录：{e}")
     except Exception as e:  # noqa: BLE001
-        # 统一把网络/解析异常转成 502，避免未捕获异常变成 500。
-        _store.update(acc.account, status="error", alive=False,
-                      alive_error=str(e)[:200], last_alive_check=int(time.time()))
+        # 偶发故障不改变账号可用性判定，只记录原因，等下一轮再确认。
+        _store.update(acc.account, alive_error=str(e)[:200],
+                      last_alive_check=int(time.time()))
         raise HTTPException(502, f"同步失败：{e}")
 
     atype = snap.get("account_type") or {}
@@ -493,6 +523,7 @@ def _sync_account(acc: Account) -> dict:
         status="active",
         alive=True,
         alive_error=None,
+        auth_expired=False,
         last_alive_check=int(time.time()),
         last_sync=int(time.time()),
     )
@@ -1076,11 +1107,12 @@ def run_alerts(force: bool = False) -> dict:
             hits.append({"event": EVENT_MEMBER_EXPIRING, "account": acc.account,
                          "title": f"会员即将到期（剩 {left} 天）：{label}"})
 
-    # 2) 账号失效
+    # 2) 登录态过期（账号本身未被限制，重新获取 token 后可继续使用）
     for acc in _store.list():
-        if acc.alive is False:
+        if acc.auth_expired:
             hits.append({"event": EVENT_ACCOUNT_INVALID, "account": acc.account,
-                         "title": f"账号失效：{acc.nickname or acc.account}"})
+                         "title": f"登录态已过期，请重新登录：{acc.nickname or acc.account}",
+                         "action": "重新登录"})
 
     # 3) 算力点余额偏低
     for acc in _store.list():
@@ -1285,8 +1317,16 @@ def get_points(account: Optional[str] = Query(None)):
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/auth/phone/send-code")
 def phone_send_code(payload: dict = Body(...)):
-    phone = (payload or {}).get("phone")
-    proxy = (payload or {}).get("proxy")
+    payload = payload or {}
+    phone = payload.get("phone")
+    proxy = payload.get("proxy")
+    # 也可直接给账号（库内手机号账号的 account 即手机号），
+    # 便于对已存在的账号「重新登录」时复用其代理配置。
+    if not phone and payload.get("account"):
+        old = _store.get(str(payload["account"]))
+        phone = old.account if old else None
+        if old and not proxy:
+            proxy = old.proxy
     if not phone:
         raise HTTPException(400, "缺少 phone")
     from liblib2api.auth.phone import PhoneLogin
@@ -1301,10 +1341,11 @@ def phone_send_code(payload: dict = Body(...)):
 
 @app.post("/api/v1/auth/phone/login")
 def phone_login(payload: dict = Body(...)):
-    phone = (payload or {}).get("phone")
-    code = (payload or {}).get("code")
-    proxy = (payload or {}).get("proxy")
-    note = (payload or {}).get("note", "")
+    payload = payload or {}
+    phone = payload.get("phone")
+    code = payload.get("code")
+    proxy = payload.get("proxy")
+    note = payload.get("note", "")
     if not phone or not code:
         raise HTTPException(400, "缺少 phone 或 code")
     from liblib2api.auth.phone import PhoneLogin
@@ -1316,24 +1357,52 @@ def phone_login(payload: dict = Body(...)):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"登录失败：{e}")
 
-    acc = Account(
-        account=phone,
-        access_token=creds.access_token,
-        login_method="phone",
-        webid=creds.extra.get("webid"),
-        nickname=info.get("nickname") or creds.extra.get("nickname"),
-        user_id=str(info.get("id")) if info.get("id") else None,
-        uuid=info.get("uuid"),
-        proxy=proxy,
-        note=note,
-    )
-    _store.add(acc)
+    old = _store.get(str(phone))
+    extra = dict((old.extra if old else {}) or {})
+    extra.update({
+        "cookies": creds.extra.get("cookies") or {},
+        "cid": creds.extra.get("cid"),
+    })
+
+    if old is not None:
+        # 已有账号：原地换 token，保留团队归属、备注、额度、积分等本地数据。
+        # 之前这里直接 _store.add() 整体替换，重新登录一次就会把
+        # 成员额度绑定、备注、算力点等信息全部清空。
+        _store.update(
+            phone,
+            access_token=creds.access_token,
+            webid=creds.extra.get("webid") or old.webid,
+            nickname=info.get("nickname") or creds.extra.get("nickname") or old.nickname,
+            user_id=str(info.get("id")) if info.get("id") else old.user_id,
+            uuid=info.get("uuid") or old.uuid,
+            proxy=proxy or old.proxy,
+            extra=extra,
+            status="active",
+            auth_expired=False,
+            alive_error=None,
+        )
+        acc = _store.get(str(phone))
+    else:
+        acc = Account(
+            account=phone,
+            access_token=creds.access_token,
+            login_method="phone",
+            webid=creds.extra.get("webid"),
+            nickname=info.get("nickname") or creds.extra.get("nickname"),
+            user_id=str(info.get("id")) if info.get("id") else None,
+            uuid=info.get("uuid"),
+            proxy=proxy,
+            note=note,
+            extra=extra,
+        )
+        _store.add(acc)
+
     try:
         _sync_account(acc)  # 登录后立即识别类型 + 模型可用性
     except Exception as e:  # noqa: BLE001
         # 账号已经登记成功，同步失败只记日志，不能让登录接口整体失败。
         log.warning("登录后同步失败：%s", e)
-    return {"account": _account_view(acc)}
+    return {"account": _account_view(acc), "relogin": old is not None}
 
 
 @app.get("/api/v1/auth/wechat/authorize")

@@ -134,9 +134,13 @@ class PhoneLogin(AuthMethod):
 
         self._raise_on_biz_error(payload, "登录")
         creds = self._extract_credentials(payload, phone)
-        self._client.cookies.update(
-            {k: v for k, v in resp.cookies.items() if v}
-        )
+        # 登录响应会下发会话 cookie：passport 的用户信息接口靠 cookie 判定登录态，
+        # 之前这里只把 cookie 留在临时客户端里，登录结束即丢失，
+        # 导致 token 过期后无法在本地续期，只能重新走短信验证码。
+        cookies = {k: v for k, v in resp.cookies.items() if v}
+        self._client.cookies.update(cookies)
+        creds.extra["cookies"] = cookies
+        creds.extra["cid"] = body.get("cid")
         return self._persist(creds)
 
     # ----- 用户信息（校验登录态）-----

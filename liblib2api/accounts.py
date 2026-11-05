@@ -84,6 +84,9 @@ class Account:
     alive: Optional[bool] = None
     # 最近一次活性检查/失败原因
     alive_error: Optional[str] = None
+    # 登录态是否已过期（平台拒绝当前 token）。这与「账号被限制」是两回事：
+    # 账号本身仍在登录，重新获取 token 后即可继续使用，故单独标记以便引导重新登录。
+    auth_expired: bool = False
     # 调用计数（用于均衡策略）
     request_count: int = 0
     # 错误计数
@@ -115,6 +118,8 @@ class Account:
                 "user_id": self.user_id,
                 "uuid": self.uuid,
                 "proxy": self.proxy,
+                "cookies": self.extra.get("cookies") or {},
+                "cid": self.extra.get("cid"),
             },
         )
 

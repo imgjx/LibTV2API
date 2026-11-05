@@ -488,7 +488,9 @@ async function loadAccounts(){const j=await api('/accounts');const tb=document.g
   for(const a of list){
     const label=a.account_type_label||(a.account_type==='member'?'VIP':a.account_type==='free'?'免费':'未知');
     const tb_=label==='VIP'?'<span class="badge b-member">VIP</span>':label==='免费'?'<span class="badge b-free">免费</span>':'<span class="badge b-free">未知</span>';
-    const alive=a.alive===true?'<span class="badge b-alive">在线</span>':a.alive===false?'<span class="badge b-dead">失效</span>':'<span class="badge b-free">未检</span>';
+    const alive=a.auth_expired?'<span class="badge b-warn" title="登录态已过期，账号本身未受限，重新获取 token 即可继续使用">登录态过期</span>'
+      :a.alive===true?'<span class="badge b-alive">在线</span>'
+      :a.alive===false?'<span class="badge b-dead">异常</span>':'<span class="badge b-free">未检</span>';
     const sub=a.is_sub?' <span class="badge b-sub">副卡</span>':'';
     const team=a.team_name?esc(a.team_name+(a.member_display_name?' · '+a.member_display_name:'')):(a.member_display_name?esc(a.member_display_name):'<span class="muted">未分配</span>');
     const q=a.quota?quotaCell(a.quota):'<span class="muted">—</span>';
@@ -497,7 +499,7 @@ async function loadAccounts(){const j=await api('/accounts');const tb=document.g
     h+=`<tr><td>${esc(a.account)}${sub}</td><td>${tb_}</td><td>${team}</td><td class="small">${a.remark?esc(a.remark):'<span class="muted">—</span>'}</td>
     <td>${esc(a.points??'-')}</td><td>${esc(a.free_power??'-')}</td><td>${q}</td><td>${ex}</td><td>${alive}</td>
     <td>${esc(a.model_usable_count??0)}/${esc(a.model_total_count??0)}</td><td class="small">${esc(a.last_claim||'-')}</td><td>${a.proxy?esc(a.proxy.slice(0,18))+'…':'-'}</td>
-    <td><button class="danger" onclick="assignAccount('${k}')">分配</button> <button class="danger" onclick="editRemark('${k}')">备注</button> <button class="danger" onclick="setProxy('${k}')">代理</button> <button class="danger" onclick="syncOne('${k}')">同步</button> <button class="danger" onclick="del('${k}')">删</button></td></tr>`;
+    <td><button class="danger" onclick="assignAccount('${k}')">分配</button> <button class="danger" onclick="editRemark('${k}')">备注</button> <button class="danger" onclick="setProxy('${k}')">代理</button> <button class="danger" onclick="syncOne('${k}')">同步</button>${a.auth_expired?' <button class="primary" onclick="relogin(\''+k+'\')">重新登录</button>':''} <button class="danger" onclick="del('${k}')">删</button></td></tr>`;
   }
   h+='</tbody></table>';tb.innerHTML=h;}
 
@@ -528,8 +530,14 @@ function toggle(id){document.getElementById(id).classList.toggle('hidden');}
 async function sendCode(){const phone=document.getElementById('p_phone').value;if(!phone)return toast('请填手机号',false);
   await api('/auth/phone/send-code',{method:'POST',body:JSON.stringify({phone,proxy:document.getElementById('p_proxy').value||null})});toast('验证码已下发');}
 async function phoneLogin(){const phone=document.getElementById('p_phone').value,code=document.getElementById('p_code').value;
-  await api('/auth/phone/login',{method:'POST',body:JSON.stringify({phone,code,proxy:document.getElementById('p_proxy').value||null,note:document.getElementById('p_note').value})});
-  toast('登录成功，已自动识别类型');loadAccounts();}
+  const j=await api('/auth/phone/login',{method:'POST',body:JSON.stringify({phone,code,proxy:document.getElementById('p_proxy').value||null,note:document.getElementById('p_note').value})});
+  document.getElementById('p_code').value='';
+  toast(j&&j.relogin?'重新登录成功，团队归属与备注已保留':'登录成功，已自动识别类型');loadAccounts();}
+// 登录态过期：一键跳到登录页并预填手机号，重新获取 token 即可继续使用，
+// 团队归属、备注、额度等本地数据在重新登录时保留。
+function relogin(acc){tab('login');document.getElementById('p_phone').value=acc;
+  document.getElementById('p_note').value='';
+  toast('请获取验证码并完成登录，以刷新该账号的登录态');}
 let wxTimer=null;
 async function wechatAuth(){const j=await api('/auth/wechat/authorize?open_browser=false');
   let qrHtml='';
@@ -552,8 +560,8 @@ async function exportAccounts(){const t=_token();
   if(!r.ok){toast('导出失败：HTTP '+r.status,false);return;}
   const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='liblib-accounts.json';a.click();
   setTimeout(()=>URL.revokeObjectURL(u),1000);toast('已导出');}
-async function syncAll(){await api('/accounts/sync-all',{method:'POST'});toast('已同步全部');loadAccounts();}
-async function syncOne(acc){await api('/accounts/'+encodeURIComponent(acc)+'/sync',{method:'POST'});toast('已同步 '+acc);loadAccounts();}
+async function syncAll(){try{await api('/accounts/sync-all',{method:'POST'});toast('已同步全部');}finally{loadAccounts();}}
+async function syncOne(acc){try{await api('/accounts/'+encodeURIComponent(acc)+'/sync',{method:'POST'});toast('已同步 '+acc);}finally{loadAccounts();}}
 async function claimAll(){const j=await api('/accounts/claim-all',{method:'POST'});toast('权益领取完成');}
 
 // ---------- 会员到期提醒 ----------
