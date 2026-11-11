@@ -20,7 +20,6 @@ from typing import Iterator, Optional
 
 import liblib2api.config as cfg
 from liblib2api.credentials import Credentials
-from liblib2api.token_expiry import TOKEN_TTL_ESTIMATE
 
 
 @dataclass
@@ -222,15 +221,21 @@ class AccountStore:
             for item in items or []:
                 try:
                     acc = Account.from_dict(item)
-                    # 老账号没有令牌签发时刻，用首次入库时间回填。
-                    # 否则这类账号在面板上永远显示「令牌有效期未知」，
-                    # 无法提前知道该重新登录了。
-                    if not acc.extra.get("token_issued_at") and acc.created_at:
-                        acc.extra["token_issued_at"] = int(acc.created_at)
-                        acc.extra.setdefault(
-                            "token_expires_at",
-                            int(acc.created_at) + TOKEN_TTL_ESTIMATE,
-                        )
+                    extra = acc.extra
+                    # 清理旧版「按估算寿命（约 2.5 天）回填」的假到期时间。
+                    # 平台并未按 2.5 天强制失效（实测手动登录可用 30 天以上），
+                    # 保留这些假值会让账号长期显示「已过期」并触发误报告警。
+                    # 判断口径：token_expires_estimated 为 True（旧版硬猜）或缺失
+                    # （旧数据无标记）时，一律当作估算值清理；只有该标记明确为
+                    # False（平台真实下发 expires_at）才保留。
+                    est_flag = extra.get("token_expires_estimated")
+                    if extra.get("token_expires_at") is not None and est_flag is not False:
+                        extra.pop("token_expires_at", None)
+                        extra.pop("token_expires_estimated", None)
+                        migrated = True
+                    # 用首次入库时间回填令牌签发时刻，用于展示「已在线 N 天」。
+                    if not extra.get("token_issued_at") and acc.created_at:
+                        extra["token_issued_at"] = int(acc.created_at)
                         migrated = True
                     self._accounts[self._key(acc)] = acc
                 except Exception:

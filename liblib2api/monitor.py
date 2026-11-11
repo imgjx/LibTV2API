@@ -181,8 +181,10 @@ class AccountMonitor:
     def _check_token_expiry(self) -> None:
         """检查登录令牌是否临近过期，必要时回调告警。
 
-        平台手机号令牌寿命约 2～3 天且没有续期端点，属于**正常到期**。
-        若不提前提醒，账号会在无人值守时突然不可用，极易被误判成账号被限制。
+        仅对「平台真实下发 expires_at」的凭据生效（极少数字段会带 expires_in）。
+        手机号验证码登录平台不返回到期时间，且实测并不会在数天内强制失效，
+        因此不再硬猜寿命、不搞倒计时告警；令牌是否真的失效以真实 API 响应
+        （未登录）在 _check_one 中判定。
         """
         if self.on_token_expiring is None:
             return
