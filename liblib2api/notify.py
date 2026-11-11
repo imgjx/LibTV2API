@@ -55,8 +55,8 @@ DEFAULT_RULES: dict[str, dict] = {
     EVENT_MEMBER_EXPIRING: {"enabled": True, "days": 30},
     EVENT_MEMBER_EXPIRED: {"enabled": True},
     EVENT_ACCOUNT_INVALID: {"enabled": True},
-    # 令牌有效期由平台决定（约 2～3 天）且无法自动续期，
-    # 因此提前一天提醒，避免账号在无人值守时突然不可用。
+    # 登录令牌即将过期提醒：仅对「平台真实下发 expires_at」的凭据生效
+    # （手机号令牌平台不返回到期时间，不再硬猜寿命，故此规则对手机账号不触发）。
     EVENT_TOKEN_EXPIRING: {"enabled": True, "hours": 24},
     EVENT_POINTS_LOW: {"enabled": True, "threshold": 100},
     EVENT_QUOTA_NEAR_LIMIT: {"enabled": True, "percent": 90},

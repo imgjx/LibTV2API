@@ -38,6 +38,8 @@ def cmd_login(args):
         WechatLogin(store=store).login(open_browser=not args.no_browser)
         print("✅ 微信扫码登录成功，凭据已保存。")
         return
+    if args.method == "cookie":
+        return _login_cookie(args)
     # phone
     login = PhoneLogin(store=store)
     if not args.code:
@@ -47,6 +49,75 @@ def cmd_login(args):
         return
     creds = login.login(args.phone, args.code)
     print(f"✅ 手机号登录成功（账号 {creds.account}），凭据已保存。")
+
+
+def _login_cookie(args) -> None:
+    """从浏览器 Cookie 直接登记账号到账号池（无需验证码/扫码）。"""
+    from liblib2api.accounts import Account, AccountStore
+    from liblib2api.auth.cookie import CookieLogin
+
+    raw = args.cookies
+    if not raw and args.cookies_file:
+        from pathlib import Path
+
+        p = Path(args.cookies_file)
+        if not p.exists():
+            print(f"❌ Cookie 文件不存在：{p}")
+            return
+        raw = p.read_text(encoding="utf-8")
+    if not raw:
+        print("❌ 请提供 --cookies 'a=1; b=2' 或 --cookies-file /path/to/cookies.txt")
+        return
+
+    try:
+        creds = CookieLogin(proxy=args.proxy).login(raw, account_hint=args.account)
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Cookie 登录失败：{e}")
+        return
+
+    info = creds.extra.get("user_info") or {}
+    astore = AccountStore()
+    old = astore.get(args.account) if args.account else astore.get(creds.account)
+    key = old.account if old else creds.account
+    if old is not None:
+        astore.update(
+            key,
+            access_token=creds.access_token,
+            webid=creds.extra.get("webid"),
+            nickname=info.get("nickname") or creds.extra.get("nickname") or old.nickname,
+            user_id=str(info.get("id")) if info.get("id") else old.user_id,
+            uuid=info.get("uuid") or old.uuid,
+            proxy=args.proxy or old.proxy,
+            extra={
+                **old.extra,
+                "cookies": creds.extra.get("cookies") or {},
+                "webid": creds.extra.get("webid") or old.webid,
+                "cid": creds.extra.get("cid"),
+                "token_issued_at": creds.extra.get("token_issued_at") or int(__import__("time").time()),
+                "token_expires_at": creds.extra.get("token_expires_at"),
+                "token_expires_estimated": creds.extra.get("token_expires_estimated", False),
+            },
+            status="active",
+            auth_expired=False,
+            alive=True,
+            alive_error=None,
+            last_alive_check=int(__import__("time").time()),
+        )
+    else:
+        acc = Account(
+            account=key,
+            access_token=creds.access_token,
+            login_method="cookie",
+            webid=creds.extra.get("webid"),
+            nickname=info.get("nickname") or creds.extra.get("nickname"),
+            user_id=str(info.get("id")) if info.get("id") else None,
+            uuid=info.get("uuid"),
+            proxy=args.proxy,
+            extra=creds.extra,
+        )
+        astore.add(acc)
+    print(f"✅ Cookie 登录成功（账号 {key}），已登记到账号池（login_method=cookie）。")
+    print("   请运行 `seed` 或直接启动面板（serve）使用该账号。")
 
 
 def cmd_status(args):
@@ -177,11 +248,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"liblib2api {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    pl = sub.add_parser("login", help="登录（wechat / phone）")
-    pl.add_argument("method", choices=["wechat", "phone"])
+    pl = sub.add_parser("login", help="登录（wechat / phone / cookie）")
+    pl.add_argument("method", choices=["wechat", "phone", "cookie"])
     pl.add_argument("--phone", help="手机号（phone 方式必填）")
     pl.add_argument("--code", help="短信验证码（phone 第二步）")
     pl.add_argument("--no-browser", action="store_true", help="不自动打开浏览器（微信）")
+    pl.add_argument("--cookies", help="浏览器 Cookie 字符串（cookie 方式，如 'a=1; b=2'）")
+    pl.add_argument("--cookies-file", help="Cookie 文件路径（cookie 方式，内容同上）")
+    pl.add_argument("--account", help="已存在账号标识（cookie 刷新会话时保留团队/备注）")
+    pl.add_argument("--proxy", help="代理地址（可选）")
     pl.set_defaults(func=cmd_login)
 
     sub.add_parser("status", help="查看登录状态").set_defaults(func=cmd_status)

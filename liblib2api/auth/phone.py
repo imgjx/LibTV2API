@@ -224,7 +224,7 @@ class PhoneLogin(AuthMethod):
             access_token=access,
             token_type="Bearer",
             refresh_token=refresh,
-            expires_at=expires_at,
+            expires_at=expires_at if expires_in is not None else None,
             scope=pick("scope"),
             login_method="phone",
             account=phone,
@@ -236,12 +236,13 @@ class PhoneLogin(AuthMethod):
                 "nickname": nickname,
                 "user_id": user_id,
                 "cid": payload.get("cid"),
-                # 令牌签发时刻与有效期必须一并落地，否则账号会在毫无预警的
-                # 情况下突然「未登录」。平台登录响应未必给 expires_in，
-                # 此时按实测寿命（约 2.5 天）估算一个保守到期点。
+                # 令牌签发时刻落地，用于展示「已在线 N 天」。
+                # 平台登录响应通常不给 expires_in，且实测表明手机号令牌并不会
+                # 在 2.5 天内强制失效（手动登录可用 30 天以上）；因此**不再估算**
+                # 到期时间，令牌是否真的失效以真实 API 响应（未登录）判定为准。
                 "token_issued_at": issued_at,
-                "token_expires_at": expires_at,
-                "token_expires_estimated": expires_at is None,
+                "token_expires_at": expires_at if expires_in is not None else None,
+                "token_expires_estimated": bool(expires_in is not None),
             },
         )
 

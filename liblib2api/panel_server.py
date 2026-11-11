@@ -412,7 +412,8 @@ def _account_view(acc: Account) -> dict:
         }
     # 会员到期提醒
     expiry = expiry_info(acc.member_until, warn_days=cfg.MEMBER_EXPIRY_WARN_DAYS)
-    # 登录令牌有效期（平台令牌寿命约 2～3 天且无法自动续期，需提前预警）
+    # 登录令牌状态：平台未返回到期时间时诚实显示「已在线 N 天」，
+    # 不再硬猜 2.5 天寿命制造假「即将过期 / 已过期」与误报告警。
     token = token_info(acc.extra)
     return {
         "account": acc.account,
@@ -458,6 +459,12 @@ def _account_view(acc: Account) -> dict:
         "token_expires_at": token.get("expires_at"),
         "token_expires_at_text": token.get("expires_at_text"),
         "token_seconds_left": token.get("seconds_left"),
+        "token_issued_at": token.get("issued_at"),
+        "token_issued_at_text": token.get("issued_at_text"),
+        "token_online_seconds": token.get("online_seconds"),
+        "token_online_days": token.get("online_days"),
+        "token_online_text": token.get("online_text"),
+        "token_has_expiry": token.get("has_expiry", False),
         "token_level": token.get("level"),
         "token_level_text": token.get("level_text"),
         "token_text": token.get("text"),
@@ -1162,12 +1169,17 @@ def run_alerts(force: bool = False) -> dict:
                          "title": f"登录态已过期，请重新登录：{acc.nickname or acc.account}",
                          "action": "重新登录"})
 
-    # 2.5) 登录令牌即将过期（平台令牌寿命约 2～3 天且无法自动续期，需提前提醒）
+    # 2.5) 登录令牌即将过期（仅当平台真实下发 expires_at 时才有意义；
+    # 手机号令牌平台不返回到期时间，不再硬猜 2.5 天寿命，故此分支对手机账号不触发）。
     token_hours = int((rules.get(EVENT_TOKEN_EXPIRING) or {}).get("hours") or 24)
     for acc in _store.list():
         if not acc.access_token or acc.auth_expired:
             continue
         info = token_info(acc.extra)
+        # 没有真实到期信息：平台未返回 expires_at，令牌是否失效以真实 API 响应判定，
+        # 这里不猜测、不告警，避免误报告警。
+        if not info.get("has_expiry"):
+            continue
         left = info.get("seconds_left")
         if left is None or left > token_hours * 3600:
             continue
@@ -1451,11 +1463,12 @@ def phone_login(payload: dict = Body(...)):
     extra.update({
         "cookies": creds.extra.get("cookies") or {},
         "cid": creds.extra.get("cid"),
-        # 令牌签发时刻与到期时刻必须落库：平台令牌寿命约 2～3 天且无法自动续期，
-        # 不记录的话账号会毫无预警地突然「未登录」，容易被误判成账号退登。
+        # 令牌签发时刻落库，用于展示「已在线 N 天」。平台不返回到期时间，且实测并不会
+        # 在数天内强制失效（手动登录可用 30 天以上），故不再估算到期；令牌是否失效
+        # 以真实 API 响应（未登录）判定。
         "token_issued_at": creds.extra.get("token_issued_at") or int(time.time()),
         "token_expires_at": creds.extra.get("token_expires_at"),
-        "token_expires_estimated": creds.extra.get("token_expires_estimated", True),
+        "token_expires_estimated": creds.extra.get("token_expires_estimated", False),
     })
 
     if old is not None:
@@ -1502,6 +1515,107 @@ def phone_login(payload: dict = Body(...)):
     except Exception as e:  # noqa: BLE001
         # 账号已经登记成功，同步失败只记日志，不能让登录接口整体失败。
         log.warning("登录后同步失败：%s", e)
+    return {"account": _account_view(acc), "relogin": old is not None}
+
+
+@app.post("/api/v1/auth/cookie/login")
+def cookie_login(payload: dict = Body(...)):
+    """从浏览器 Cookie 直接登记/刷新账号。
+
+    请求体：
+      {
+        "cookies": "a=1; b=2" | {"a":"1"} | [{"name":"a","value":"1"}],
+        "webid":  可选（设备指纹，缺省从 cookie 提取）,
+        "cid":    可选,
+        "account": 可选（已存在账号的标识，用于「重新登录」时保留团队归属/备注）,
+        "proxy":  可选,
+        "note":   可选（新账号备注）
+      }
+    """
+    payload = payload or {}
+    cookies = payload.get("cookies")
+    webid = payload.get("webid")
+    cid = payload.get("cid")
+    note = payload.get("note", "")
+    proxy = payload.get("proxy")
+    account_hint = payload.get("account")
+
+    if not cookies:
+        raise HTTPException(400, "缺少 cookies")
+
+    old = _store.get(str(account_hint)) if account_hint else None
+    old_webid = old.webid if old else None
+
+    from liblib2api.auth.cookie import CookieLogin
+
+    try:
+        with CookieLogin(proxy=proxy) as c:
+            creds = c.login(
+                cookies,
+                webid=webid or old_webid,
+                cid=cid,
+                account_hint=account_hint,
+            )
+            # Cookie 登录成功后再次拉取用户信息，补全昵称/uid，
+            # 失败不阻断（token 与 cookie 已拿到，登录本身成功）。
+            info: dict = {}
+            try:
+                info = creds.extra.get("user_info") or {}
+            except Exception:  # noqa: BLE001
+                info = {}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Cookie 登录失败：{e}")
+
+    # 账号标识：优先沿用已存在账号（重新登录场景），否则用 Cookie 解析出的标识。
+    key = old.account if old else creds.account
+
+    extra = dict((old.extra if old else {}) or {})
+    extra.update({
+        "cookies": creds.extra.get("cookies") or {},
+        "webid": creds.extra.get("webid") or old_webid,
+        "cid": creds.extra.get("cid"),
+        "token_issued_at": creds.extra.get("token_issued_at") or int(time.time()),
+        "token_expires_at": creds.extra.get("token_expires_at"),
+        "token_expires_estimated": creds.extra.get("token_expires_estimated", False),
+    })
+
+    if old is not None:
+        # 已有账号：原地刷新会话（保留团队归属 / 备注 / 额度 / 积分等本地数据）。
+        _store.update(
+            key,
+            access_token=creds.access_token,
+            webid=creds.extra.get("webid") or old_webid,
+            nickname=info.get("nickname") or creds.extra.get("nickname") or old.nickname,
+            user_id=str(info.get("id")) if info.get("id") else old.user_id,
+            uuid=info.get("uuid") or old.uuid,
+            proxy=proxy or old.proxy,
+            extra=extra,
+            status="active",
+            auth_expired=False,
+            alive=True,
+            alive_error=None,
+            last_alive_check=int(time.time()),
+        )
+        acc = _store.get(key)
+    else:
+        acc = Account(
+            account=key,
+            access_token=creds.access_token,
+            login_method="cookie",
+            webid=creds.extra.get("webid"),
+            nickname=info.get("nickname") or creds.extra.get("nickname"),
+            user_id=str(info.get("id")) if info.get("id") else None,
+            uuid=info.get("uuid"),
+            proxy=proxy,
+            note=note,
+            extra=extra,
+        )
+        _store.add(acc)
+
+    try:
+        _sync_account(acc)  # 登录后立即识别类型 + 模型可用性
+    except Exception as e:  # noqa: BLE001
+        log.warning("Cookie 登录后同步失败：%s", e)
     return {"account": _account_view(acc), "relogin": old is not None}
 
 
