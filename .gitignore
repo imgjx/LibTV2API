@@ -11,8 +11,14 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
-dist/
+/dist/
 build/
+
+# Vue front：ignore 依赖与本地产物，但保留构建产物 dist/ 供同源部署
+front/node_modules/
+front/.vite/
+!front/dist/
+!front/dist/**
 
 # 环境变量
 .env

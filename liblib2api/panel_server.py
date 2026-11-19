@@ -36,6 +36,7 @@ from typing import Any, Optional
 import qrcode
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
 import liblib2api.config as cfg
@@ -2478,13 +2479,24 @@ def mcp_tools(account: Optional[str] = Query(None)):
 # 面板前端
 # ---------------------------------------------------------------------------
 PANEL_HTML = Path(__file__).parent / "panel.html"
+# Vue 构建产物（front/dist）。存在则优先托管 Vue 版；未构建时回退单 HTML 面板。
+FRONT_DIST = Path(__file__).parent.parent / "front" / "dist"
+FRONT_INDEX = FRONT_DIST / "index.html"
+FRONT_ASSETS = FRONT_DIST / "assets"
+
+# 挂载 Vue 静态资源（vite base='/'，资源走 /assets/*）。
+# /assets 前缀不与任何 /api/v1 业务路由冲突，可安全挂载；目录不存在时自动跳过。
+if FRONT_ASSETS.is_dir():
+    app.mount("/assets", StaticFiles(directory=FRONT_ASSETS), name="front-assets")
 
 
 def _panel_html() -> str:
-    """读取零依赖单 HTML 面板；缺失时给出可诊断的提示页。"""
+    """优先返回 Vue 构建版面板；未构建则回退零依赖单 HTML 面板。"""
+    if FRONT_INDEX.exists():
+        return FRONT_INDEX.read_text(encoding="utf-8")
     if PANEL_HTML.exists():
         return PANEL_HTML.read_text(encoding="utf-8")
-    return "<h1>LibTV-Team 面板</h1><p>panel.html 未找到</p>"
+    return "<h1>LibTV-Team 面板</h1><p>未找到面板文件（front/dist/index.html 或 panel.html）</p>"
 
 
 @app.get("/panel", response_class=HTMLResponse)
